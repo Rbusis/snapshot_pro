@@ -1,23 +1,20 @@
-// index.js — JTF v0.8.1.2 AUTOSELECT
-// MMS Score + JDS Fusion + ΔOI mémoire + Telegram Alerts
-// Compatible Railway — ESM — Aucun fichier écrit
+// index.js — JTF v0.8.1.2 AUTOSELECT (Railway)
+// TOP30 Bitget USDT Perp, MMS -> JDS, Setup State, Confiance, R:R, Reco
+// Sortie : tableau Markdown Telegram, max 3 trades, aucun fichier écrit.
 
 import fetch from "node-fetch";
 
-// ========== CONFIG ==========
+// ========= CONFIG =========
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS   = 5 * 60_000;   // 5 minutes
-const ALERT_THRESHOLD    = 80;           // jds final >= 80
-const MIN_ALERT_DELAY_MS = 15 * 60_000;  // anti-spam 15 minutes
+// Snapshot toutes les 5 minutes
+const SCAN_INTERVAL_MS   = 5 * 60_000;
+// Anti-spam : délai min entre 2 envois pour même paire/direction
+const MIN_ALERT_DELAY_MS = 15 * 60_000;
 
-// mémoire runtime (pas de fichiers sur Railway)
-const prevOI     = new Map();   // symbol -> OI précédent
-const lastAlerts = new Map();   // "BTC-LONG" -> timestamp
-
-// TOP30 Bitget USDT Perp
+// TOP30 Bitget USDT perp
 const SYMBOLS = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -27,71 +24,99 @@ const SYMBOLS = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
-// ========== UTILS ==========
+// ========= MÉMOIRE =========
+
+// ΔOI persisté uniquement en RAM (reset à chaque redéploiement)
+const prevOI     = new Map();   // symbol -> OI précédent
+// Anti-spam par paire/direction
+const lastAlerts = new Map();   // "symbol-direction" -> timestamp
+
+// ========= UTILS =========
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-const num = (v,d=6)=>v==null?null:+(+v).toFixed(d);
+const num   = (v,d=6)=>v==null?null:+(+v).toFixed(d);
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
-
-function base(sym){ return sym.replace("_UMCBL",""); }
+const baseSymbol = s => s.replace("_UMCBL","");
 
 async function safeGetJson(url){
   try{
-    const r = await fetch(url,{headers:{Accept:"application/json"}});
+    const r = await fetch(url,{ headers:{ Accept:"application/json" } });
     if(!r.ok) return null;
     return await r.json();
-  }catch{return null;}
+  }catch{
+    return null;
+  }
 }
 
-// ========== API HELPERS ==========
+// ========= API BITGET =========
 
 async function getCandles(symbol, seconds, limit=400){
-  const b = base(symbol);
-  let j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${b}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`);
+  const base = baseSymbol(symbol);
+  // v2
+  let j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`
+  );
   if(j?.data?.length){
-    return j.data.map(c=>({t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]})).sort((a,b)=>a.t-b.t);
+    return j.data
+      .map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] }))
+      .sort((a,b)=>a.t-b.t);
   }
-  j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}`);
+  // v1 fallback
+  j = await safeGetJson(
+    `https://api.bitget.com/api/mix/v1/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}`
+  );
   if(j?.data?.length){
-    return j.data.map(c=>({t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]})).sort((a,b)=>a.t-b.t);
+    return j.data
+      .map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] }))
+      .sort((a,b)=>a.t-b.t);
   }
   return [];
 }
 
-async function getTicker(sym){
-  const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/ticker?symbol=${sym}`);
+async function getTicker(symbol){
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`
+  );
   return j?.data ?? null;
 }
 
-async function getMarkPrice(sym){
-  const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/mark-price?symbol=${sym}`);
+async function getMarkPrice(symbol){
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/mix/v1/market/mark-price?symbol=${symbol}`
+  );
   if(j?.data?.markPrice!=null) return +j.data.markPrice;
-  const tk = await getTicker(sym);
-  return tk?.markPrice?+tk.markPrice:null;
+  const tk = await getTicker(symbol);
+  return tk?.markPrice ? +tk.markPrice : null;
 }
 
-async function getDepth(sym){
-  const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/depth?symbol=${sym}&limit=5`);
+async function getDepth(symbol){
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/mix/v1/market/depth?symbol=${symbol}&limit=5`
+  );
   if(j?.data?.bids && j.data.asks){
     return {
       bids: j.data.bids.map(x=>[+x[0],+x[1]]),
       asks: j.data.asks.map(x=>[+x[0],+x[1]])
     };
   }
-  return {bids:[],asks:[]};
+  return { bids:[], asks:[] };
 }
 
-async function getFunding(sym){
-  const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/currentFundRate?symbol=${sym}`);
+async function getFunding(symbol){
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/mix/v1/market/currentFundRate?symbol=${symbol}`
+  );
   return j?.data ?? null;
 }
 
-async function getOI(sym){
-  const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/open-interest?symbol=${sym}`);
+async function getOI(symbol){
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/mix/v1/market/open-interest?symbol=${symbol}`
+  );
   return j?.data ?? null;
 }
 
-// ========== INDICATORS ==========
+// ========= INDICATEURS =========
 
 function percent(a,b){ return b ? (a/b - 1)*100 : null; }
 
@@ -139,14 +164,18 @@ function vwap(c){
   return v?pv/v:null;
 }
 
-// ========== MMS SCORE ==========
-
-function toScore100(x){
-  if(x==null||isNaN(x)) return null;
-  return clamp((x+1)/2 *100,0,100);
+function positionInDay(last,low,high){
+  const r = high - low;
+  if(r<=0 || last==null) return null;
+  return ((last-low)/r)*100;
 }
 
-// ========== PROCESS SYMBOL ==========
+function toScore100(x){
+  if(x==null || isNaN(x)) return null;
+  return clamp((x+1)/2 * 100, 0, 100);
+}
+
+// ========= SNAPSHOT PAR PAIRE (MMS) =========
 
 async function processSymbol(symbol){
   const [tk, fr, oi] = await Promise.all([
@@ -156,9 +185,10 @@ async function processSymbol(symbol){
   ]);
   if(!tk) return null;
 
-  const last  = +tk.last;
-  const high24= +tk.high24h;
-  const low24 = +tk.low24h;
+  const last   = +tk.last;
+  const high24 = +tk.high24h;
+  const low24  = +tk.low24h;
+  const vol24  = +tk.baseVolume;
 
   const openInterest = oi ? +oi.amount : null;
   const prev = prevOI.get(symbol) ?? null;
@@ -167,46 +197,77 @@ async function processSymbol(symbol){
     : null;
   prevOI.set(symbol, openInterest ?? prev);
 
-  const [c1m,c5m,c15m,c1h] = await Promise.all([
+  const [c1m,c5m,c15m,c1h,c4h] = await Promise.all([
     getCandles(symbol,60,120),
     getCandles(symbol,300,120),
     getCandles(symbol,900,400),
-    getCandles(symbol,3600,400)
+    getCandles(symbol,3600,400),
+    getCandles(symbol,14400,400)
   ]);
 
-  const [depth,markPrice] = await Promise.all([
+  const [depth, markPrice] = await Promise.all([
     getDepth(symbol),
     getMarkPrice(symbol)
   ]);
 
-  // ΔP
+  let spreadPct = null;
+  if(depth.bids.length && depth.asks.length){
+    const b=depth.bids[0][0];
+    const a=depth.asks[0][0];
+    spreadPct=((a-b)/((a+b)/2))*100;
+    if(spreadPct<0) spreadPct=-spreadPct;
+  }
+
+  const closes1m  = c1m.map(x=>x.c);
+  const closes5m  = c5m.map(x=>x.c);
+  const closes15m = c15m.map(x=>x.c);
+  const closes1h  = c1h.map(x=>x.c);
+  const closes4h  = c4h.map(x=>x.c);
+
+  const rsi1m  = rsi(closes1m,14);
+  const rsi5m  = rsi(closes5m,14);
+  const rsi15  = rsi(closes15m,14);
+  const rsi1h  = rsi(closes1h,14);
+  const rsi4h  = rsi(closes4h,14);
+
+  const var15m = closeChange(c15m,1);
+  const var1h  = closeChange(c1h,1);
+  const var4h  = closeChange(c4h,1);
+
+  const dP_1m  = closeChange(c1m,1);
   const dP_5m  = closeChange(c5m,1);
   const dP_15m = closeChange(c15m,1);
 
-  // ΔVWAP
+  const volaPct = (last && high24 && low24)
+    ? ((high24 - low24)/last)*100
+    : null;
+
+  const tend24  = (high24 > low24 && last)
+    ? (((last-low24)/(high24-low24))*200 - 100)
+    : null;
+
+  const posDay  = positionInDay(last,low24,high24);
+
   const vwap1h    = vwap(c1h.slice(-48));
-  const deltaVWAP = (vwap1h && last)? percent(last,vwap1h):null;
+  const deltaVWAP = (vwap1h && last) ? percent(last,vwap1h) : null;
 
-  // RSI
-  const rsi15 = rsi(c15m.map(x=>x.c),14);
+  // ===== MMS (ex-JDS du snapshot, long/short séparés) =====
+  const normLongFromDelta  = dp => dp==null ? 0 : clamp(-dp/2,-1,1);
+  const normShortFromDelta = dp => dp==null ? 0 : clamp(dp/2,-1,1);
 
-  // MMS Long/Short
-  const longNorm = {
-    m15: dP_15m!=null?clamp(-dP_15m/2,-1,1):0,
-    m5:  dP_5m !=null?clamp(-dP_5m /2,-1,1):0,
-    vwap:deltaVWAP!=null?clamp(-deltaVWAP/2,-1,1):0,
-    rsi: rsi15!=null?clamp((50-rsi15)/20,-1,1):0
-  };
+  const m5L   = normLongFromDelta(dP_5m);
+  const m15L  = normLongFromDelta(dP_15m);
+  const m5S   = normShortFromDelta(dP_5m);
+  const m15S  = normShortFromDelta(dP_15m);
 
-  const shortNorm = {
-    m15: dP_15m!=null?clamp(dP_15m/2,-1,1):0,
-    m5:  dP_5m !=null?clamp(dP_5m /2,-1,1):0,
-    vwap:deltaVWAP!=null?clamp(deltaVWAP/2,-1,1):0,
-    rsi: rsi15!=null?clamp((rsi15-50)/20,-1,1):0
-  };
+  const dvwapL = deltaVWAP!=null ? clamp(-deltaVWAP/2,-1,1) : 0;
+  const dvwapS = deltaVWAP!=null ? clamp( deltaVWAP/2,-1,1) : 0;
 
-  const MMS_long_raw  = longNorm.m15*0.4 + longNorm.m5*0.2 + longNorm.vwap*0.2 + longNorm.rsi*0.2;
-  const MMS_short_raw = shortNorm.m15*0.4 + shortNorm.m5*0.2 + shortNorm.vwap*0.2 + shortNorm.rsi*0.2;
+  const rsiL   = rsi15!=null ? clamp((50-rsi15)/20,-1,1) : 0;
+  const rsiS   = rsi15!=null ? clamp((rsi15-50)/20,-1,1) : 0;
+
+  const MMS_long_raw  = m15L*0.4 + m5L*0.2 + dvwapL*0.2 + rsiL*0.2;
+  const MMS_short_raw = m15S*0.4 + m5S*0.2 + dvwapS*0.2 + rsiS*0.2;
 
   const MMS_long  = toScore100(MMS_long_raw);
   const MMS_short = toScore100(MMS_short_raw);
@@ -215,135 +276,410 @@ async function processSymbol(symbol){
     symbol,
     last,
     markPrice,
-    deltaVWAPpct: num(deltaVWAP,4),
-    deltaOIpct:   num(deltaOI,3),
-    rsi15:        num(rsi15,2),
-    dP_15m:       num(dP_15m,2),
+    high24, low24, vol24,
+    volaPct,
+    tend24,
+    posDay,
+    spreadPct: spreadPct!=null ? num(spreadPct,4) : null,
+    deltaVWAPpct: deltaVWAP!=null ? num(deltaVWAP,4) : null,
+    deltaOIpct:   deltaOI!=null   ? num(deltaOI,3)   : null,
+    rsi: {
+      "1m":  num(rsi1m,2),
+      "5m":  num(rsi5m,2),
+      "15m": num(rsi15,2),
+      "1h":  num(rsi1h,2),
+      "4h":  num(rsi4h,2)
+    },
+    variationPct: {
+      "15m": num(var15m,2),
+      "1h" : num(var1h,2),
+      "4h" : num(var4h,2)
+    },
+    dP_1m:  num(dP_1m,2),
+    dP_5m:  num(dP_5m,2),
+    dP_15m: num(dP_15m,2),
     MMS_long,
     MMS_short
   };
 }
 
-// ========== FUSION MMS → JDS FINAL ==========
+// ========= FUSION MMS → JDS =========
 
-function fuse(record){
-  const L = record.MMS_long;
-  const S = record.MMS_short;
-
+function fuseJDS(rec){
+  const L = rec.MMS_long;
+  const S = rec.MMS_short;
   if(L==null && S==null) return null;
-
   if((S ?? -999) > (L ?? -999)){
     return { direction:"SHORT", jds:S };
-  }else{
-    return { direction:"LONG", jds:L };
   }
+  return { direction:"LONG", jds:L };
 }
 
-// ========== ANTI-SPAM ==========
+// ========= SETUP STATE =========
 
-function shouldAlert(symbol,dir,jds){
-  if(jds < ALERT_THRESHOLD) return false;
-  const key = `${symbol}-${dir}`;
+function getSetupState(jds){
+  if(jds < 40) return "DEAD";
+  if(jds < 70) return "CHOP";
+  if(jds < 80) return "WATCH";
+  if(jds < 90) return "SETUP_EMERGENT";
+  if(jds < 95) return "SETUP_READY";
+  return "SETUP_PRIME";
+}
+
+// ========= OI IMPULSE SCORE =========
+
+function getOiImpulse(deltaOIpct, volaPct){
+  if(deltaOIpct==null || volaPct==null || Math.abs(volaPct)<0.1){
+    return { score:0, label:"neutre" };
+  }
+  const score = deltaOIpct / volaPct; // ΔOI / Vola
+  let label;
+  if(score > 0.10)       label = "construction forte";
+  else if(score >= 0.03) label = "construction légère";
+  else if(score > -0.02) label = "neutre";
+  else if(score < -0.03) label = "purge";
+  else                   label = "neutre";
+  return { score, label };
+}
+
+// ========= CONFIANCE % =========
+
+function computeConfidence(rec, fusion, setupState, oiImpulse){
+  let conf = 50;
+  const jds = fusion.jds;
+  const dir = fusion.direction;
+  const dVW = rec.deltaVWAPpct;
+  const vola= rec.volaPct;
+  const r   = rec.rsi;
+
+  // JDS contribution
+  if(jds >= 95) conf += 18;
+  else if(jds >= 90) conf += 12;
+  else if(jds >= 80) conf += 6;
+  else if(jds < 70)  conf -= 10;
+
+  // ΔVWAP alignement
+  if(dVW!=null){
+    if(dir==="LONG"){
+      if(dVW <= -0.8 && dVW >= -8) conf += 12;
+      else if(dVW < -12 || dVW > 6) conf -= 10;
+    }else{
+      if(dVW >= 0.8 && dVW <= 8) conf += 12;
+      else if(dVW > 12 || dVW < -6) conf -= 10;
+    }
+  }
+
+  // RSI multi-TF
+  if(r["15m"]!=null && r["1h"]!=null && r["4h"]!=null){
+    let scoreRSI = 0;
+    const frames = [r["15m"],r["1h"],r["4h"]];
+    if(dir==="LONG"){
+      for(const v of frames){
+        if(v < 45) scoreRSI += 1;
+        else if(v > 60) scoreRSI -= 1;
+      }
+    }else{
+      for(const v of frames){
+        if(v > 55) scoreRSI += 1;
+        else if(v < 40) scoreRSI -= 1;
+      }
+    }
+    conf += scoreRSI * 4; // -12..+12
+  }
+
+  // OI Impulse
+  if(oiImpulse.label === "construction forte") conf += 15;
+  else if(oiImpulse.label === "construction légère") conf += 8;
+  else if(oiImpulse.label === "purge") conf -= 15;
+
+  // Volatilité cohérente
+  if(vola!=null){
+    if(vola >= 2 && vola <= 20) conf += 5;
+    else if(vola > 35 || vola < 1) conf -= 10;
+  }
+
+  // Setup DEAD/CHOP
+  if(setupState==="DEAD" || setupState==="CHOP"){
+    conf = Math.min(conf, 55);
+  }
+
+  return clamp(Math.round(conf),0,100);
+}
+
+// ========= R:R et PLAN (entrée / SL / TP) =========
+
+function estimateRR(vola){
+  if(vola==null) return 1.3;
+  if(vola < 2)   return 1.3;
+  if(vola < 8)   return 1.6;
+  if(vola < 15)  return 1.4;
+  if(vola < 25)  return 1.2;
+  return 1.1; // trop violent → souvent AVOID
+}
+
+function buildTradePlan(rec, fusion, jds, rr){
+  const price = rec.last;
+  const vola  = rec.volaPct ?? 5;
+  const dir   = fusion.direction;
+
+  // distance SL ~ fraction de la vola, clampée
+  let riskPerc = clamp(vola / 3, 0.5, 5); // % distance SL
+  const rewardPerc = riskPerc * rr;
+
+  let entry = price;
+  let sl, tp1, tp2;
+
+  if(dir==="LONG"){
+    sl  = price * (1 - riskPerc/100);
+    if(jds >= 90){
+      tp1 = price * (1 + (0.9*riskPerc)/100);           // ≈ 0.9R
+      tp2 = price * (1 + (2.7*riskPerc*rr/(rr))/100);   // ≈ 2.7R approx
+    }else{
+      tp1 = price * (1 + (rewardPerc)/100);             // R:R simple
+      tp2 = null;
+    }
+  }else{
+    sl  = price * (1 + riskPerc/100);
+    if(jds >= 90){
+      tp1 = price * (1 - (0.9*riskPerc)/100);
+      tp2 = price * (1 - (2.7*riskPerc*rr/(rr))/100);
+    }else{
+      tp1 = price * (1 - (rewardPerc)/100);
+      tp2 = null;
+    }
+  }
+
+  return {
+    entry: num(entry,6),
+    sl:    num(sl,6),
+    tp1:   num(tp1,6),
+    tp2:   tp2!=null ? num(tp2,6) : null,
+    riskPerc: num(riskPerc,2),
+    rr: num(rr,2)
+  };
+}
+
+// ========= RECOMMANDATION =========
+
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState){
+  let reco;
+
+  // Règles d'état
+  if(setupState==="DEAD" || setupState==="CHOP") {
+    reco = "AVOID";
+  } else if(setupState==="WATCH" || setupState==="SETUP_EMERGENT"){
+    reco = "WAIT ENTRY";
+  } else if(setupState==="SETUP_READY"){
+    reco = "TAKE — REDUCED";
+  } else { // PRIME
+    reco = "TAKE NOW";
+  }
+
+  // R:R minimal
+  if(rr < 1.2) reco = "AVOID";
+
+  // Confiance globale
+  if(conf < 70) reco = "AVOID";
+
+  // Règles fines de Confiance
+  if(conf >= 70 && conf <= 79 && reco!=="AVOID"){
+    reco = "WAIT ENTRY";
+  }
+
+  // Verrou TAKE NOW (v1.2)
+  if(reco==="TAKE NOW"){
+    const ok =
+      jds >= 95 &&
+      conf >= 90 &&
+      rr >= 1.5 &&
+      dVW!=null && Math.abs(dVW) <= 10 &&
+      oiImpulse.label !== "purge";
+    if(!ok){
+      // downgrade
+      if(jds >= 90 && conf >= 80) reco = "TAKE — REDUCED";
+      else reco = "WAIT ENTRY";
+    }
+  }
+
+  // Verrou TAKE — REDUCED
+  if(reco==="TAKE — REDUCED"){
+    const ok =
+      jds >= 90 && jds <= 94 &&
+      conf >= 80 &&
+      oiImpulse.label !== "purge";
+    if(!ok) reco = "WAIT ENTRY";
+  }
+
+  // Si JDS < 90 → jamais TAKE NOW
+  if(jds < 90 && (reco==="TAKE NOW" || reco==="TAKE — REDUCED")){
+    reco = "WAIT ENTRY";
+  }
+
+  // Volatilité aberrante
+  if(reco!=="AVOID" && (recVolaTooCrazy(rr))){
+    // petite sécurité : si vola trop folle, on évite
+    // on ne connaît pas la vola ici → géré via rr < 1.2 avant
+  }
+
+  return reco;
+}
+
+// dummy placeholder pour cohérence (on a déjà filtré via rr)
+function recVolaTooCrazy(rr){
+  return false;
+}
+
+// ========= ANTI-SPAM =========
+
+function shouldSendFor(symbol, direction){
+  const key = `${symbol}-${direction}`;
   const now = Date.now();
   const last = lastAlerts.get(key) ?? 0;
-  if(now-last < MIN_ALERT_DELAY_MS) return false;
-  lastAlerts.set(key,now);
+  if(now - last < MIN_ALERT_DELAY_MS) return false;
+  lastAlerts.set(key, now);
   return true;
 }
 
-// ========== TELEGRAM ==========
+// ========= TELEGRAM =========
 
 async function sendTelegram(text){
   if(!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID){
-    console.error("❌ Missing Telegram config");
+    console.error("❌ TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant.");
     return;
   }
   try{
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
       method:"POST",
       headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode:"Markdown" })
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "Markdown"
+      })
     });
   }catch(e){
-    console.error("❌ Telegram:",e.message);
+    console.error("❌ Erreur Telegram:", e.message);
   }
 }
 
-// ========== SCAN COMPLET ==========
+// ========= SCAN COMPLET =========
 
 async function scanOnce(){
-  console.log("🔍 Scan complet…");
+  console.log("🔍 Scan JTF v0.8.1.2…");
 
-  const results = [];
+  const snapshots = [];
   for(const s of SYMBOLS){
     try{
       const r = await processSymbol(s);
-      if(r) results.push(r);
+      if(r) snapshots.push(r);
     }catch(e){
-      console.error("Erreur:",s,e.message);
+      console.error("Erreur snapshot", s, e.message);
     }
-    await sleep(120);
+    await sleep(120); // léger spacing API
   }
 
-  let bestL=null, bestS=null;
+  const candidates = [];
+  for(const rec of snapshots){
+    const fusion = fuseJDS(rec);
+    if(!fusion) continue;
 
-  for(const r of results){
-    const f = fuse(r);
-    if(!f) continue;
-
-    if(f.direction==="LONG"){
-      if(!bestL || f.jds > bestL.jds) bestL = {r,...f};
-    } else {
-      if(!bestS || f.jds > bestS.jds) bestS = {r,...f};
-    }
-  }
-
-  // LONG ALERT
-  if(bestL && shouldAlert(bestL.r.symbol,"LONG",bestL.jds)){
-    const e=bestL.r;
-    await sendTelegram(
-`*JTF ALERT — LONG*
-Pair: \`${e.symbol}\`
-JDS/100: *${bestL.jds.toFixed(1)}*
-MMS(L,S): ${e.MMS_long}/${e.MMS_short}
-Prix: ${e.last}
-ΔVWAP: ${e.deltaVWAPpct}%
-ΔOI: ${e.deltaOIpct}%
-RSI15m: ${e.rsi15}
-Idée: momentum LONG cohérent.`
+    const jds = fusion.jds;
+    const setupState = getSetupState(jds);
+    const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+    const conf       = computeConfidence(rec, fusion, setupState, oiImpulse);
+    const rr         = estimateRR(rec.volaPct);
+    const plan       = buildTradePlan(rec, fusion, jds, rr);
+    const reco       = computeRecommendation(
+      jds, conf, rr, oiImpulse, rec.deltaVWAPpct, setupState
     );
+
+    candidates.push({
+      symbol: rec.symbol,
+      direction: fusion.direction,
+      jds,
+      setupState,
+      confiance: conf,
+      oiImpulse,
+      rr: +plan.rr,
+      plan,
+      rec,
+      reco
+    });
   }
 
-  // SHORT ALERT
-  if(bestS && shouldAlert(bestS.r.symbol,"SHORT",bestS.jds)){
-    const e=bestS.r;
+  // Filtre : on ne garde pas AVOID
+  const tradables = candidates
+    .filter(c => c.reco !== "AVOID")
+    .sort((a,b)=>{
+      // tri principal : JDS, puis Confiance
+      if(b.jds !== a.jds) return b.jds - a.jds;
+      return b.confiance - a.confiance;
+    })
+    .slice(0,3); // max 3 trades
+
+  if(!tradables.length){
     await sendTelegram(
-`*JTF ALERT — SHORT*
-Pair: \`${e.symbol}\`
-JDS/100: *${bestS.jds.toFixed(1)}*
-MMS(L,S): ${e.MMS_long}/${e.MMS_short}
-Prix: ${e.last}
-ΔVWAP: ${e.deltaVWAPpct}%
-ΔOI: ${e.deltaOIpct}%
-RSI15m: ${e.rsi15}
-Idée: momentum SHORT cohérent.`
+`🔴 *JTF AUTOSELECT — Aucun trade judicieux*
+
+Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance < 70% ou un R:R insuffisant.
+→ Résultat : *Aucun trade recommandé sur ce snapshot.*
+Attends un contexte plus propre avant de prendre un risque.`
     );
+    console.log("ℹ️ Aucun trade judicieux.");
+    return;
   }
 
-  console.log("✅ Scan terminé.");
+  // Vérif anti-spam : au moins un nouveau setup
+  const fresh = tradables.filter(c => shouldSendFor(c.symbol, c.direction));
+  if(!fresh.length){
+    console.log("⏱️ Pas de nouveaux setups (anti-spam), on skip l'envoi.");
+    return;
+  }
+
+  // Construction tableau Markdown
+  let table = "| Pair | Direction | Type | Entrée | SL | TP | R:R | Lev | JDS/100 | Confiance% | Reco |\n";
+  table    += "|------|-----------|------|--------|----|----|-----|-----|---------|------------|------|\n";
+
+  for(const c of tradables){
+    const vola = c.rec.volaPct ?? 5;
+    const type   = vola > 12 ? "Scalp" : "Swing";
+    const levier = vola <= 5 ? "4x" : (vola <= 15 ? "3x" : "2x");
+    const tpStr  = c.jds >= 90 && c.plan.tp2
+      ? `${c.plan.tp1} / ${c.plan.tp2}`
+      : `${c.plan.tp1}`;
+
+    table += `| \`${c.symbol}\` | ${c.direction} | ${type} | ${c.plan.entry} | ${c.plan.sl} | ${tpStr} | ${c.plan.rr} | ${levier} | ${c.jds.toFixed(1)} | ${c.confiance}% | ${c.reco} |\n`;
+  }
+
+  const best = tradables[0];
+
+  const summary =
+`📊 *JTF v0.8.1.2 AUTOSELECT — Snapshot TOP30*
+
+${table}
+
+Résumé :
+• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, R:R).
+• Meilleur score : \`${best.symbol}\` (${best.direction}) avec JDS/100 = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.
+• Recommandations déjà intégrées : AVOID / WAIT ENTRY / TAKE — REDUCED / TAKE NOW selon ta grille.
+• Respecte ton money management : pas plus de 3 trades simultanés issus de ce tableau, pas de FOMO hors sélection.
+• Si la structure change fortement avant ton entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.`;
+
+  await sendTelegram(summary);
+  console.log("✅ Tableau JTF envoyé.");
 }
 
-// ========== MAIN LOOP ==========
+// ========= MAIN LOOP =========
 
 async function main(){
-  console.log("🚀 JTF Scanner démarré (ESM / Railway).");
-  await sendTelegram("🟢 JTF Scanner Railway démarré (scan toutes les 5 minutes).");
+  console.log("🚀 JTF v0.8.1.2 AUTOSELECT — Bot Railway démarré.");
+  await sendTelegram("🟢 JTF v0.8.1.2 AUTOSELECT démarré sur Railway (snapshot TOP30 toutes les 5 minutes).");
 
   while(true){
     try{
       await scanOnce();
     }catch(e){
-      console.error("❌ Scan error:",e.message);
+      console.error("❌ Erreur scan:", e.message);
     }
     await sleep(SCAN_INTERVAL_MS);
   }
