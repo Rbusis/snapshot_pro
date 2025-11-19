@@ -1,6 +1,6 @@
-// index.js — JTF v0.8.1.3 AUTOSELECT (Railway)
-// TOP30 Bitget USDT Perp, MMS -> JDS, Setup State, Confiance, R:R, Reco
-// Sortie : tableau Markdown compact Telegram, max 3 trades, aucun fichier écrit.
+// index.js — JTF v0.8.1.3 AUTOSELECT (Railway / Telegram)
+// TOP30 Bitget USDT Perp, MMS -> JDS fusionné, Setup State, Confiance, R:R, Reco
+// Sortie : blocs Telegram avec emojis, max 3 trades, aucun fichier écrit.
 
 import fetch from "node-fetch";
 
@@ -251,6 +251,8 @@ async function processSymbol(symbol){
   const vwap1h    = vwap(c1h.slice(-48));
   const deltaVWAP = (vwap1h && last) ? percent(last,vwap1h) : null;
 
+  const fundingRate = fr ? +fr.fundingRate * 100 : null;
+
   // ===== MMS (ex-JDS du snapshot, long/short séparés) =====
   const normLongFromDelta  = dp => dp==null ? 0 : clamp(-dp/2,-1,1);
   const normShortFromDelta = dp => dp==null ? 0 : clamp(dp/2,-1,1);
@@ -283,6 +285,7 @@ async function processSymbol(symbol){
     spreadPct: spreadPct!=null ? num(spreadPct,4) : null,
     deltaVWAPpct: deltaVWAP!=null ? num(deltaVWAP,4) : null,
     deltaOIpct:   deltaOI!=null   ? num(deltaOI,3)   : null,
+    fundingRatePct: fundingRate!=null ? num(fundingRate,6) : null,
     rsi: {
       "1m":  num(rsi1m,2),
       "5m":  num(rsi5m,2),
@@ -422,7 +425,6 @@ function buildTradePlan(rec, fusion, jds, rr){
   const vola  = rec.volaPct ?? 5;
   const dir   = fusion.direction;
 
-  // distance SL ~ fraction de la vola, clampée
   let riskPerc = clamp(vola / 3, 0.5, 5); // % distance SL
   const rewardPerc = riskPerc * rr;
 
@@ -433,7 +435,7 @@ function buildTradePlan(rec, fusion, jds, rr){
     sl  = price * (1 - riskPerc/100);
     if(jds >= 90){
       tp1 = price * (1 + (0.9*riskPerc)/100);           // ≈ 0.9R
-      tp2 = price * (1 + (2.7*riskPerc)/100);           // ≈ 2.7R approx
+      tp2 = price * (1 + (2.7*riskPerc)/100);           // ≈ 2.7R
     }else{
       tp1 = price * (1 + (rewardPerc)/100);             // R:R simple
       tp2 = null;
@@ -512,7 +514,7 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
     reco = "WAIT ENTRY";
   }
 
-  // HARD LOCK : purge forte contre la direction → AVOID
+  // HARD LOCK : purge forte contre la direction
   if(direction==="LONG" && oiImpulse.label==="purge") {
     reco = "AVOID";
   }
@@ -554,6 +556,16 @@ async function sendTelegram(text){
   }catch(e){
     console.error("❌ Erreur Telegram:", e.message);
   }
+}
+
+function formatRecoWithEmoji(reco){
+  const map = {
+    "AVOID": "🟥 AVOID",
+    "WAIT ENTRY": "🟧 WAIT ENTRY",
+    "TAKE — REDUCED": "🟨 TAKE — REDUCED",
+    "TAKE NOW": "🟩 TAKE NOW"
+  };
+  return map[reco] || reco;
 }
 
 // ========= SCAN COMPLET =========
@@ -605,7 +617,6 @@ async function scanOnce(){
   const tradables = candidates
     .filter(c => c.reco !== "AVOID")
     .sort((a,b)=>{
-      // tri principal : Setup State (PRIME > READY > EMERGENT > WATCH), puis JDS, puis Confiance
       const order = {
         "SETUP_PRIME":4,
         "SETUP_READY":3,
@@ -627,8 +638,7 @@ async function scanOnce(){
 `🔴 *JTF AUTOSELECT — Aucun trade judicieux*
 
 Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance < 70% ou un R:R insuffisant.
-→ Résultat : *Aucun trade recommandé sur ce snapshot.*
-Attends un contexte plus propre avant de prendre un risque.`
+→ Résultat : *aucun trade recommandé* sur ce snapshot.`
     );
     console.log("ℹ️ Aucun trade judicieux.");
     return;
@@ -641,37 +651,44 @@ Attends un contexte plus propre avant de prendre un risque.`
     return;
   }
 
-  // ===== Tableau compact Markdown =====
-  let table = "| Pair | Dir | Type | Entry | SL | TP | R:R | Lev | JDS | Conf | Reco |\n";
-  table    += "|------|-----|------|-------|----|----|-----|-----|-----|------|------|\n";
+  // ===== Format Telegram PRO avec emojis =====
+  const lines = [];
+  lines.push("📊 *JTF v0.8.1.3 AUTOSELECT — Snapshot TOP30*");
 
-  for(const c of tradables){
-    const vola = c.rec.volaPct ?? 5;
+  tradables.forEach((c, idx) => {
+    const vola   = c.rec.volaPct ?? 5;
     const type   = vola > 12 ? "Scalp" : "Swing";
     const levier = vola <= 5 ? "4x" : (vola <= 15 ? "3x" : "2x");
-    const tpStr  = c.jds >= 90 && c.plan.tp2
-      ? `${c.plan.tp1}/${c.plan.tp2}`
+    const tpStr  = (c.jds >= 90 && c.plan.tp2)
+      ? `${c.plan.tp1} / ${c.plan.tp2}`
       : `${c.plan.tp1}`;
     const rrStr  = (+c.plan.rr).toFixed(1);
-    table += `| \`${c.symbol}\` | ${c.direction} | ${type} | ${c.plan.entry} | ${c.plan.sl} | ${tpStr} | ${rrStr} | ${levier} | ${c.jds.toFixed(1)} | ${c.confiance} | ${c.reco} |\n`;
-  }
+    const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
+
+    lines.push("");
+    lines.push(`*${idx+1}) ${c.symbol}*`);
+    lines.push(`${dirEmoji} *${c.direction} – ${type}*`);
+    lines.push(`💠 *Entry:* ${c.plan.entry}`);
+    lines.push(`🛡️ *SL:* ${c.plan.sl}`);
+    lines.push(`🎯 *TP:* ${tpStr}`);
+    lines.push(`📏 *R:R:* ${rrStr} — *Lev:* ${levier}`);
+    lines.push(`🔥 *JDS:* ${c.jds.toFixed(1)}`);
+    lines.push(`🔍 *Confiance:* ${c.confiance}%`);
+    lines.push(formatRecoWithEmoji(c.reco));
+  });
 
   const best = tradables[0];
 
-  const summary =
-`📊 *JTF v0.8.1.2 AUTOSELECT — Snapshot TOP30*
+  lines.push("");
+  lines.push("*Résumé :*");
+  lines.push(`• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, R:R).`);
+  lines.push(`• Meilleur score : *${best.symbol}* (${best.direction}) avec JDS = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.`);
+  lines.push("• Aucun trade en dehors de cette liste : pas de FOMO, pas plus de 3 positions issues de ce snapshot.");
+  lines.push("• Si la structure change fortement avant l'entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.");
 
-${table}
-
-Résumé :
-• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, R:R).
-• Meilleur score : \`${best.symbol}\` (${best.direction}) avec JDS/100 = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.
-• Les recommandations intègrent déjà tes verrous : AVOID / WAIT ENTRY / TAKE — REDUCED / TAKE NOW.
-• Aucun trade en dehors de ce tableau : pas de FOMO, pas plus de 3 positions issues de ce snapshot.
-• Si la structure change fortement avant l'entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.`;
-
-  await sendTelegram(summary);
-  console.log("✅ Tableau JTF envoyé.");
+  const message = lines.join("\n");
+  await sendTelegram(message);
+  console.log("✅ Snapshot JTF envoyé.");
 }
 
 // ========= MAIN LOOP =========
