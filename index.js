@@ -1,6 +1,6 @@
-// index.js — JTF v0.8.1.2 AUTOSELECT (Railway)
+// index.js — JTF v0.8.1.3 AUTOSELECT (Railway)
 // TOP30 Bitget USDT Perp, MMS -> JDS, Setup State, Confiance, R:R, Reco
-// Sortie : tableau Markdown Telegram, max 3 trades, aucun fichier écrit.
+// Sortie : tableau Markdown compact Telegram, max 3 trades, aucun fichier écrit.
 
 import fetch from "node-fetch";
 
@@ -34,7 +34,7 @@ const lastAlerts = new Map();   // "symbol-direction" -> timestamp
 // ========= UTILS =========
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-const num   = (v,d=6)=>v==null?null:+(+v).toFixed(d);
+const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const baseSymbol = s => s.replace("_UMCBL","");
 
@@ -433,7 +433,7 @@ function buildTradePlan(rec, fusion, jds, rr){
     sl  = price * (1 - riskPerc/100);
     if(jds >= 90){
       tp1 = price * (1 + (0.9*riskPerc)/100);           // ≈ 0.9R
-      tp2 = price * (1 + (2.7*riskPerc*rr/(rr))/100);   // ≈ 2.7R approx
+      tp2 = price * (1 + (2.7*riskPerc)/100);           // ≈ 2.7R approx
     }else{
       tp1 = price * (1 + (rewardPerc)/100);             // R:R simple
       tp2 = null;
@@ -442,7 +442,7 @@ function buildTradePlan(rec, fusion, jds, rr){
     sl  = price * (1 + riskPerc/100);
     if(jds >= 90){
       tp1 = price * (1 - (0.9*riskPerc)/100);
-      tp2 = price * (1 - (2.7*riskPerc*rr/(rr))/100);
+      tp2 = price * (1 - (2.7*riskPerc)/100);
     }else{
       tp1 = price * (1 - (rewardPerc)/100);
       tp2 = null;
@@ -450,10 +450,10 @@ function buildTradePlan(rec, fusion, jds, rr){
   }
 
   return {
-    entry: num(entry,6),
-    sl:    num(sl,6),
-    tp1:   num(tp1,6),
-    tp2:   tp2!=null ? num(tp2,6) : null,
+    entry: num(entry,4),
+    sl:    num(sl,4),
+    tp1:   num(tp1,4),
+    tp2:   tp2!=null ? num(tp2,4) : null,
     riskPerc: num(riskPerc,2),
     rr: num(rr,2)
   };
@@ -461,7 +461,7 @@ function buildTradePlan(rec, fusion, jds, rr){
 
 // ========= RECOMMANDATION =========
 
-function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState){
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction){
   let reco;
 
   // Règles d'état
@@ -480,9 +480,7 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState){
 
   // Confiance globale
   if(conf < 70) reco = "AVOID";
-
-  // Règles fines de Confiance
-  if(conf >= 70 && conf <= 79 && reco!=="AVOID"){
+  else if(conf >= 70 && conf <= 79 && reco!=="AVOID"){
     reco = "WAIT ENTRY";
   }
 
@@ -495,7 +493,6 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState){
       dVW!=null && Math.abs(dVW) <= 10 &&
       oiImpulse.label !== "purge";
     if(!ok){
-      // downgrade
       if(jds >= 90 && conf >= 80) reco = "TAKE — REDUCED";
       else reco = "WAIT ENTRY";
     }
@@ -515,18 +512,15 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState){
     reco = "WAIT ENTRY";
   }
 
-  // Volatilité aberrante
-  if(reco!=="AVOID" && (recVolaTooCrazy(rr))){
-    // petite sécurité : si vola trop folle, on évite
-    // on ne connaît pas la vola ici → géré via rr < 1.2 avant
+  // HARD LOCK : purge forte contre la direction → AVOID
+  if(direction==="LONG" && oiImpulse.label==="purge") {
+    reco = "AVOID";
+  }
+  if(direction==="SHORT" && oiImpulse.label==="construction forte") {
+    reco = "AVOID";
   }
 
   return reco;
-}
-
-// dummy placeholder pour cohérence (on a déjà filtré via rr)
-function recVolaTooCrazy(rr){
-  return false;
 }
 
 // ========= ANTI-SPAM =========
@@ -565,7 +559,7 @@ async function sendTelegram(text){
 // ========= SCAN COMPLET =========
 
 async function scanOnce(){
-  console.log("🔍 Scan JTF v0.8.1.2…");
+  console.log("🔍 Scan JTF v0.8.1.3…");
 
   const snapshots = [];
   for(const s of SYMBOLS){
@@ -583,14 +577,14 @@ async function scanOnce(){
     const fusion = fuseJDS(rec);
     if(!fusion) continue;
 
-    const jds = fusion.jds;
+    const jds        = fusion.jds;
     const setupState = getSetupState(jds);
     const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct);
-    const conf       = computeConfidence(rec, fusion, setupState, oiImpulse);
+    const confiance  = computeConfidence(rec, fusion, setupState, oiImpulse);
     const rr         = estimateRR(rec.volaPct);
     const plan       = buildTradePlan(rec, fusion, jds, rr);
     const reco       = computeRecommendation(
-      jds, conf, rr, oiImpulse, rec.deltaVWAPpct, setupState
+      jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction
     );
 
     candidates.push({
@@ -598,7 +592,7 @@ async function scanOnce(){
       direction: fusion.direction,
       jds,
       setupState,
-      confiance: conf,
+      confiance,
       oiImpulse,
       rr: +plan.rr,
       plan,
@@ -611,7 +605,18 @@ async function scanOnce(){
   const tradables = candidates
     .filter(c => c.reco !== "AVOID")
     .sort((a,b)=>{
-      // tri principal : JDS, puis Confiance
+      // tri principal : Setup State (PRIME > READY > EMERGENT > WATCH), puis JDS, puis Confiance
+      const order = {
+        "SETUP_PRIME":4,
+        "SETUP_READY":3,
+        "SETUP_EMERGENT":2,
+        "WATCH":1,
+        "CHOP":0,
+        "DEAD":0
+      };
+      const oa = order[a.setupState] ?? 0;
+      const ob = order[b.setupState] ?? 0;
+      if(ob !== oa) return ob - oa;
       if(b.jds !== a.jds) return b.jds - a.jds;
       return b.confiance - a.confiance;
     })
@@ -636,19 +641,19 @@ Attends un contexte plus propre avant de prendre un risque.`
     return;
   }
 
-  // Construction tableau Markdown
-  let table = "| Pair | Direction | Type | Entrée | SL | TP | R:R | Lev | JDS/100 | Confiance% | Reco |\n";
-  table    += "|------|-----------|------|--------|----|----|-----|-----|---------|------------|------|\n";
+  // ===== Tableau compact Markdown =====
+  let table = "| Pair | Dir | Type | Entry | SL | TP | R:R | Lev | JDS | Conf | Reco |\n";
+  table    += "|------|-----|------|-------|----|----|-----|-----|-----|------|------|\n";
 
   for(const c of tradables){
     const vola = c.rec.volaPct ?? 5;
     const type   = vola > 12 ? "Scalp" : "Swing";
     const levier = vola <= 5 ? "4x" : (vola <= 15 ? "3x" : "2x");
     const tpStr  = c.jds >= 90 && c.plan.tp2
-      ? `${c.plan.tp1} / ${c.plan.tp2}`
+      ? `${c.plan.tp1}/${c.plan.tp2}`
       : `${c.plan.tp1}`;
-
-    table += `| \`${c.symbol}\` | ${c.direction} | ${type} | ${c.plan.entry} | ${c.plan.sl} | ${tpStr} | ${c.plan.rr} | ${levier} | ${c.jds.toFixed(1)} | ${c.confiance}% | ${c.reco} |\n`;
+    const rrStr  = (+c.plan.rr).toFixed(1);
+    table += `| \`${c.symbol}\` | ${c.direction} | ${type} | ${c.plan.entry} | ${c.plan.sl} | ${tpStr} | ${rrStr} | ${levier} | ${c.jds.toFixed(1)} | ${c.confiance} | ${c.reco} |\n`;
   }
 
   const best = tradables[0];
@@ -661,9 +666,9 @@ ${table}
 Résumé :
 • ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, R:R).
 • Meilleur score : \`${best.symbol}\` (${best.direction}) avec JDS/100 = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.
-• Recommandations déjà intégrées : AVOID / WAIT ENTRY / TAKE — REDUCED / TAKE NOW selon ta grille.
-• Respecte ton money management : pas plus de 3 trades simultanés issus de ce tableau, pas de FOMO hors sélection.
-• Si la structure change fortement avant ton entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.`;
+• Les recommandations intègrent déjà tes verrous : AVOID / WAIT ENTRY / TAKE — REDUCED / TAKE NOW.
+• Aucun trade en dehors de ce tableau : pas de FOMO, pas plus de 3 positions issues de ce snapshot.
+• Si la structure change fortement avant l'entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.`;
 
   await sendTelegram(summary);
   console.log("✅ Tableau JTF envoyé.");
@@ -672,8 +677,8 @@ Résumé :
 // ========= MAIN LOOP =========
 
 async function main(){
-  console.log("🚀 JTF v0.8.1.2 AUTOSELECT — Bot Railway démarré.");
-  await sendTelegram("🟢 JTF v0.8.1.2 AUTOSELECT démarré sur Railway (snapshot TOP30 toutes les 5 minutes).");
+  console.log("🚀 JTF v0.8.1.3 AUTOSELECT — Bot Railway démarré.");
+  await sendTelegram("🟢 JTF v0.8.1.3 AUTOSELECT démarré sur Railway (snapshot TOP30 toutes les 5 minutes).");
 
   while(true){
     try{
