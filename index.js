@@ -532,15 +532,21 @@ function buildTradePlan(rec, fusion, jds, rr){
       tp2 = null;
     }
   }
+  // Auto-précision pour micro-tokens (ex: PEPE, SHIB, FLOKI…)
+const decimals =
+  price < 0.0001 ? 7 :
+  price < 0.01   ? 6 :
+  price < 0.1    ? 5 :
+                   4;
 
   return {
-    entry: num(entry,4),
-    sl:    num(sl,4),
-    tp1:   num(tp1,4),
-    tp2:   tp2!=null ? num(tp2,4) : null,
-    riskPerc: num(riskPerc,2),
-    rr: num(rr,2)
-  };
+  entry: num(entry, decimals),
+  sl:    num(sl, decimals),
+  tp1:   num(tp1, decimals),
+  tp2:   tp2!=null ? num(tp2, decimals) : null,
+  riskPerc: num(riskPerc,2),
+  rr: num(rr,2)
+};
 }
 
 // ========= RECOMMANDATION =========
