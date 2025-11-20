@@ -609,6 +609,39 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
   if(direction==="SHORT" && oiImpulse.label==="construction forte") {
     reco = "AVOID";
   }
+  
+    // ===== MUST-HAVE : ΔVWAP Global (structure profonde HTF) =====
+  const dVG = rec.deltaVWAPgPct;
+  if (dVG != null) {
+
+    // 1) CONTRETENDANCE FORTE → on évite
+    if (direction === "LONG"  && dVG > 1.5) {
+      reco = "WAIT ENTRY";    // jamais TAKE NOW
+      conf -= 10;             // pénalité structurelle
+    }
+    if (direction === "SHORT" && dVG < -1.5) {
+      reco = "WAIT ENTRY";
+      conf -= 10;
+    }
+
+    // 2) ALIGNÉ AVEC LA STRUCTURE → renforcement des signaux
+    if (direction === "LONG" && dVG < -0.3) {
+      conf += 8;  // structure baissière favorable au short
+    }
+    if (direction === "SHORT" && dVG > 0.3) {
+      conf += 8;  // structure haussière favorable au long
+    }
+
+    // 3) Setup PREMIUM : autoriser TAKE NOW seulement si structure OK
+    if (reco === "TAKE NOW") {
+      if (direction === "LONG" && dVG > 0.5) {
+        reco = "TAKE — REDUCED";   // structure moins propre
+      }
+      if (direction === "SHORT" && dVG < -0.5) {
+        reco = "TAKE — REDUCED";
+      }
+    }
+  }
 
   return reco;
 }
