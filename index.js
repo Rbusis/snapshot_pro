@@ -1006,6 +1006,16 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
     lines.push(`📏 *R:R:* ${rrStr} — *Lev:* ${levier}`);
     lines.push(`🔥 *JDS:* ${c.jds.toFixed(1)}`);
     lines.push(`🔍 *Confiance:* ${c.confiance}%`);
+    // ΔVWAP Global (structure HTC)
+const dvg = c.rec.deltaVWAPgPct;
+let dvwG_emoji = "⚪️";
+if (dvg != null) {
+  if (dvg > 0.5) dvwG_emoji = "🔴";   // structure haussière (contre SHORT)
+  else if (dvg < -0.5) dvwG_emoji = "🔵"; // structure baissière (contre LONG)
+  else dvwG_emoji = "⚪️";            // neutre
+}
+
+lines.push(`${dvwG_emoji} *ΔVWAPg:* ${dvg != null ? dvg.toFixed(2) : "n/a"}%`);
     lines.push(formatRecoWithEmoji(c.reco));
   });
 
