@@ -1,6 +1,5 @@
-// index.js — JTF v0.9 AUTOSELECT (Railway / Telegram)
+// index.js — JTF v0.8.1.3 AUTOSELECT (Railway / Telegram)
 // TOP30 Bitget USDT Perp, MMS -> JDS fusionné, Setup State, Confiance, R:R, Reco
-// Modules v0.9 : OI Impulse Weighted, ΔVWAP global, EMA20 multi-TF, RSI/EMA cohérence, Trade Validator
 // Sortie : blocs Telegram avec emojis, max 3 trades, aucun fichier écrit.
 
 import fetch from "node-fetch";
@@ -14,6 +13,7 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 // Anti-spam : délai min entre 2 envois pour même paire/direction
 const MIN_ALERT_DELAY_MS = 15 * 60_000;
+
 // Délai de re-validation des trades TAKE (en ms)
 const VALIDATION_DELAY_MS = 30_000; // 30 secondes
 
@@ -251,18 +251,10 @@ async function processSymbol(symbol){
 
   const posDay  = positionInDay(last,low24,high24);
 
-  // VWAPs 1h et 4h (pour ΔVWAP local et global)
   const vwap1h    = vwap(c1h.slice(-48));
-  const vwap4h    = vwap(c4h.slice(-48));
   const deltaVWAP = (vwap1h && last) ? percent(last,vwap1h) : null;
-  const deltaVWAPg = (vwap1h && vwap4h) ? percent(vwap1h, vwap4h) : null;
 
   const fundingRate = fr ? +fr.fundingRate * 100 : null;
-
-  // EMA20 multi-TF (5m, 15m, 1h)
-  const ema20_5m  = ema(c5m,20,x=>x.c);
-  const ema20_15m = ema(c15m,20,x=>x.c);
-  const ema20_1h  = ema(c1h,20,x=>x.c);
 
   // ===== MMS (ex-JDS du snapshot, long/short séparés) =====
   const normLongFromDelta  = dp => dp==null ? 0 : clamp(-dp/2,-1,1);
@@ -295,7 +287,6 @@ async function processSymbol(symbol){
     posDay,
     spreadPct: spreadPct!=null ? num(spreadPct,4) : null,
     deltaVWAPpct: deltaVWAP!=null ? num(deltaVWAP,4) : null,
-    deltaVWAPgPct: deltaVWAPg!=null ? num(deltaVWAPg,4) : null,
     deltaOIpct:   deltaOI!=null   ? num(deltaOI,3)   : null,
     fundingRatePct: fundingRate!=null ? num(fundingRate,6) : null,
     rsi: {
@@ -314,12 +305,7 @@ async function processSymbol(symbol){
     dP_5m:  num(dP_5m,2),
     dP_15m: num(dP_15m,2),
     MMS_long,
-    MMS_short,
-    ema20: {
-      "5m":  num(ema20_5m,6),
-      "15m": num(ema20_15m,6),
-      "1h":  num(ema20_1h,6)
-    }
+    MMS_short
   };
 }
 
@@ -346,56 +332,37 @@ function getSetupState(jds){
   return "SETUP_PRIME";
 }
 
-// ========= OI IMPULSE SCORE (pondéré par tendance) =========
+// ========= OI IMPULSE SCORE =========
 
-function getOiImpulse(deltaOIpct, volaPct, tend24){
-  if(deltaOIpct==null || volaPct==null || Math.abs(volaPct) < 0.1){
-    return { score:0, weighted:0, label:"neutre" };
+function getOiImpulse(deltaOIpct, volaPct){
+  if(deltaOIpct==null || volaPct==null || Math.abs(volaPct)<0.1){
+    return { score:0, label:"neutre" };
   }
-  const base = deltaOIpct / volaPct;
-  let dirTrend = 0;
-  if(tend24 != null){
-    if(tend24 > 10) dirTrend = 1;
-    else if(tend24 < -10) dirTrend = -1;
-  }
-  // Si pas de tendance claire, on réduit l'impact, sinon on pèse par la direction
-  const weighted = dirTrend === 0 ? base * 0.5 : base * dirTrend;
-
+  const score = deltaOIpct / volaPct; // ΔOI / Vola
   let label;
-  if(weighted > 0.10)       label = "construction forte";
-  else if(weighted >= 0.03) label = "construction légère";
-  else if(weighted > -0.02) label = "neutre";
-  else if(weighted < -0.03) label = "purge";
-  else                      label = "neutre";
-
-  return { score: base, weighted, label };
+  if(score > 0.10)       label = "construction forte";
+  else if(score >= 0.03) label = "construction légère";
+  else if(score > -0.02) label = "neutre";
+  else if(score < -0.03) label = "purge";
+  else                   label = "neutre";
+  return { score, label };
 }
 
-// ========= RSI & EMA COHERENCE =========
+// ========= RSI COHERENCE =========
 
 function isRSICoherent(rec, direction){
   const r = rec.rsi;
   const r15 = r["15m"];
   const r1h = r["1h"];
   const r4h = r["4h"];
-  if(r15==null || r1h==null || r4h==null) return true;
+  if(r15==null || r1h==null || r4h==null) return true; // on ne pénalise pas si manque de data
 
   if(direction === "LONG"){
-    // On veut un gradient raisonnable, sans incohérence majeure
-    return (r15 <= r1h + 8) && (r1h <= r4h + 8);
+    // structure ascendante
+    return r15 <= r1h && r1h <= r4h;
   }else{
-    return (r15 >= r1h - 8) && (r1h >= r4h - 8);
-  }
-}
-
-function isEMAAligned(rec, direction){
-  const e = rec.ema20 || {};
-  const vals = [e["5m"], e["15m"], e["1h"]].filter(v => v != null);
-  if(!vals.length || rec.last == null) return true;
-  if(direction === "LONG"){
-    return vals.every(v => rec.last >= v);
-  }else{
-    return vals.every(v => rec.last <= v);
+    // SHORT : structure descendante
+    return r15 >= r1h && r1h >= r4h;
   }
 }
 
@@ -406,7 +373,6 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
   const jds = fusion.jds;
   const dir = fusion.direction;
   const dVW = rec.deltaVWAPpct;
-  const dVWg = rec.deltaVWAPgPct;
   const vola= rec.volaPct;
   const r   = rec.rsi;
 
@@ -416,22 +382,15 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
   else if(jds >= 80) conf += 6;
   else if(jds < 70)  conf -= 10;
 
-  // ΔVWAP local alignement
+  // ΔVWAP alignement
   if(dVW!=null){
     if(dir==="LONG"){
-      if(dVW <= -0.8 && dVW >= -8) conf += 10;
+      if(dVW <= -0.8 && dVW >= -8) conf += 12;
       else if(dVW < -12 || dVW > 6) conf -= 10;
     }else{
-      if(dVW >= 0.8 && dVW <= 8) conf += 10;
+      if(dVW >= 0.8 && dVW <= 8) conf += 12;
       else if(dVW > 12 || dVW < -6) conf -= 10;
     }
-  }
-
-  // ΔVWAP global (trend VWAP 4h vs 1h)
-  if(dVWg!=null){
-    if(dir==="LONG" && dVWg >= -3 && dVWg <= 6) conf += 6;
-    if(dir==="SHORT" && dVWg <= 3 && dVWg >= -6) conf += 6;
-    if(Math.abs(dVWg) > 12) conf -= 8;
   }
 
   // RSI multi-TF gradient
@@ -449,20 +408,15 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
         else if(v < 40) scoreRSI -= 1;
       }
     }
-    conf += scoreRSI * 3;
+    conf += scoreRSI * 4; // -12..+12
   }
 
   // RSI cohérence structurelle
   if(!isRSICoherent(rec, dir)){
-    conf -= 15;
+    conf -= 15; // grosse pénalité
   }
 
-  // EMA20 multi-TF alignement
-  const emaAligned = isEMAAligned(rec, dir);
-  if(emaAligned) conf += 8;
-  else conf -= 12;
-
-  // OI Impulse Weighted
+  // OI Impulse
   if(oiImpulse.label === "construction forte") conf += 15;
   else if(oiImpulse.label === "construction légère") conf += 8;
   else if(oiImpulse.label === "purge") conf -= 15;
@@ -489,7 +443,7 @@ function estimateRR(vola){
   if(vola < 8)   return 1.6;
   if(vola < 15)  return 1.4;
   if(vola < 25)  return 1.2;
-  return 1.1;
+  return 1.1; // trop violent → souvent AVOID
 }
 
 function buildTradePlan(rec, fusion, jds, rr){
@@ -497,7 +451,7 @@ function buildTradePlan(rec, fusion, jds, rr){
   const vola  = rec.volaPct ?? 5;
   const dir   = fusion.direction;
 
-  let riskPerc = clamp(vola / 3, 0.5, 5);
+  let riskPerc = clamp(vola / 3, 0.5, 5); // % distance SL
   const rewardPerc = riskPerc * rr;
 
   let entry = price;
@@ -506,10 +460,10 @@ function buildTradePlan(rec, fusion, jds, rr){
   if(dir==="LONG"){
     sl  = price * (1 - riskPerc/100);
     if(jds >= 90){
-      tp1 = price * (1 + (0.9*riskPerc)/100);
-      tp2 = price * (1 + (2.7*riskPerc)/100);
+      tp1 = price * (1 + (0.9*riskPerc)/100);           // ≈ 0.9R
+      tp2 = price * (1 + (2.7*riskPerc)/100);           // ≈ 2.7R
     }else{
-      tp1 = price * (1 + (rewardPerc)/100);
+      tp1 = price * (1 + (rewardPerc)/100);             // R:R simple
       tp2 = null;
     }
   }else{
@@ -535,9 +489,9 @@ function buildTradePlan(rec, fusion, jds, rr){
 
 // ========= RECOMMANDATION =========
 
-function computeRecommendation(jds, conf, rr, oiImpulse, dVWLocal, dVWGlobal, setupState, direction, rsiCoherent, emaAligned){
-  // Verrou RSI/EMA incohérents : on ne prend pas le trade
-  if(!rsiCoherent || !emaAligned){
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent){
+  // Verrou RSI incohérent : on ne prend pas le trade
+  if(!rsiCoherent){
     return "AVOID";
   }
 
@@ -564,14 +518,13 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVWLocal, dVWGlobal, se
     reco = "WAIT ENTRY";
   }
 
-  // Verrou TAKE NOW
+  // Verrou TAKE NOW (v1.2)
   if(reco==="TAKE NOW"){
     const ok =
       jds >= 95 &&
       conf >= 90 &&
       rr >= 1.5 &&
-      dVWGlobal != null && Math.abs(dVWGlobal) <= 10 &&
-      dVWLocal != null && Math.abs(dVWLocal) <= 12 &&
+      dVW!=null && Math.abs(dVW) <= 10 &&
       oiImpulse.label !== "purge";
     if(!ok){
       if(jds >= 90 && conf >= 80) reco = "TAKE — REDUCED";
@@ -579,7 +532,7 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVWLocal, dVWGlobal, se
     }
   }
 
-  // Verrou TAKE — REDUCED
+  // Verrou TAKE — REDUCED (un peu plus souple)
   if(reco==="TAKE — REDUCED"){
     const ok =
       jds >= 90 && jds <= 94 &&
@@ -628,22 +581,156 @@ function shouldSendFor(symbol, direction, reco){
   const now = Date.now();
   const last = lastAlerts.get(key);
 
+  // jamais envoyé : on envoie
   if(!last){
     lastAlerts.set(key, { ts: now, reco });
     return true;
   }
 
+  // si reco a changé (ex: WAIT -> TAKE REDUCED), on envoie même si délai non écoulé
   if(last.reco !== reco){
     lastAlerts.set(key, { ts: now, reco });
     return true;
   }
 
+  // même reco, on applique le délai anti-spam
   if(now - last.ts < MIN_ALERT_DELAY_MS){
     return false;
   }
 
   lastAlerts.set(key, { ts: now, reco });
   return true;
+}
+
+// ========= TRADE VALIDATOR (TAKE — REDUCED / TAKE NOW) =========
+
+// Recalcule un "candidate" complet pour une paire unique
+async function buildCandidateForSymbol(symbol, initialDirection) {
+  const rec = await processSymbol(symbol);
+  if (!rec) return null;
+
+  const fusion = fuseJDS(rec);
+  if (!fusion) return null;
+
+  // si la direction change complètement, c'est déjà un gros warning
+  const direction = fusion.direction;
+  const jds        = fusion.jds;
+  const setupState = getSetupState(jds);
+  const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+  const rsiCoherent = isRSICoherent(rec, direction);
+  const confiance  = computeConfidence(rec, fusion, setupState, oiImpulse);
+  const rr         = estimateRR(rec.volaPct);
+  const plan       = buildTradePlan(rec, fusion, jds, rr);
+  const reco       = computeRecommendation(
+    jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, direction, rsiCoherent
+  );
+
+  return {
+    symbol,
+    direction,
+    jds,
+    setupState,
+    confiance,
+    oiImpulse,
+    rr: +plan.rr,
+    plan,
+    rec,
+    reco,
+    rsiCoherent
+  };
+}
+
+// Vérifie si le trade initial est invalidé par la nouvelle structure
+function isTradeInvalidated(initial, latest) {
+  if (!latest) return true; // pas de data = on préfère annuler
+
+  // 1) Si la reco n'est plus TAKE — REDUCED / TAKE NOW → on annule
+  if (latest.reco === "AVOID" || latest.reco === "WAIT ENTRY") {
+    return true;
+  }
+
+  // 2) Changement de direction = invalidation
+  if (latest.direction !== initial.direction) {
+    return true;
+  }
+
+  const oldRec = initial.rec;
+  const newRec = latest.rec;
+
+  // 3) Changement de signe sur ΔVWAP ou amplitude trop extrême
+  const oldDVW = oldRec.deltaVWAPpct;
+  const newDVW = newRec.deltaVWAPpct;
+  if (oldDVW != null && newDVW != null) {
+    if (oldDVW * newDVW < 0) {
+      // signe opposé → retournement brutal
+      return true;
+    }
+    if (Math.abs(newDVW) > 10) {
+      // trop extrême par rapport à ton style
+      return true;
+    }
+  }
+
+  // 4) OI Impulse : purge forte vs direction
+  const oiLabel = latest.oiImpulse.label;
+  if (latest.direction === "LONG" && oiLabel === "purge") return true;
+  if (latest.direction === "SHORT" && oiLabel === "construction forte") return true;
+
+  // 5) RSI incohérent maintenant
+  if (!latest.rsiCoherent) return true;
+
+  // 6) Prix déjà trop loin : SL touché ou TP1 déjà fait avant entrée
+  const priceNow = newRec.last;
+  const entry    = initial.plan.entry;
+  const sl       = initial.plan.sl;
+  const tp1      = initial.plan.tp1;
+
+  if (latest.direction === "LONG") {
+    if (priceNow <= sl) return true;    // déjà invalidé
+    if (tp1 != null && priceNow >= tp1) return true; // mouvement déjà réalisé
+  } else {
+    if (priceNow >= sl) return true;
+    if (tp1 != null && priceNow <= tp1) return true;
+  }
+
+  return false;
+}
+
+// Programme une validation rapide du trade après VALIDATION_DELAY_MS
+function scheduleTradeValidation(initialTrade) {
+  // On ne valide que TAKE — REDUCED et TAKE NOW
+  if (initialTrade.reco !== "TAKE — REDUCED" && initialTrade.reco !== "TAKE NOW") {
+    return;
+  }
+
+  setTimeout(async () => {
+    try {
+      const latest = await buildCandidateForSymbol(
+        initialTrade.symbol,
+        initialTrade.direction
+      );
+      const invalid = isTradeInvalidated(initialTrade, latest);
+
+      if (invalid) {
+        // Message simple : le plan n'est plus valide
+        const lines = [];
+        lines.push("⚠️ *JTF Trade invalidé — Validation rapide*");
+        lines.push(`Pair: \`${initialTrade.symbol}\``);
+        lines.push(`Direction: *${initialTrade.direction}*`);
+        lines.push(`Reco initiale: ${initialTrade.reco}`);
+        lines.push("");
+        lines.push("Structure cassée après validation (prix / ΔVWAP / ΔOI / RSI).");
+        lines.push("➡️ *Ne pas entrer sur ce setup.* Attends le prochain snapshot.");
+
+        await sendTelegram(lines.join("\n"));
+        console.log(`⚠️ Trade invalidé (validator) sur ${initialTrade.symbol} (${initialTrade.direction}).`);
+      } else {
+        console.log(`✅ Trade toujours valide après validation rapide: ${initialTrade.symbol} (${initialTrade.direction}).`);
+      }
+    } catch (e) {
+      console.error("Erreur dans scheduleTradeValidation:", e.message);
+    }
+  }, VALIDATION_DELAY_MS);
 }
 
 // ========= TELEGRAM =========
@@ -678,142 +765,10 @@ function formatRecoWithEmoji(reco){
   return map[reco] || reco;
 }
 
-// ========= TRADE VALIDATOR (TAKE — REDUCED / TAKE NOW) =========
-
-async function buildCandidateForSymbol(symbol, initialDirection) {
-  const rec = await processSymbol(symbol);
-  if (!rec) return null;
-
-  const fusion = fuseJDS(rec);
-  if (!fusion) return null;
-
-  const direction = fusion.direction;
-  const jds        = fusion.jds;
-  const setupState = getSetupState(jds);
-  const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct, rec.tend24);
-  const rsiCoherent = isRSICoherent(rec, direction);
-  const emaAligned  = isEMAAligned(rec, direction);
-  const confiance  = computeConfidence(rec, fusion, setupState, oiImpulse);
-  const rr         = estimateRR(rec.volaPct);
-  const plan       = buildTradePlan(rec, fusion, jds, rr);
-  const reco       = computeRecommendation(
-    jds, confiance, rr, oiImpulse,
-    rec.deltaVWAPpct, rec.deltaVWAPgPct,
-    setupState, direction, rsiCoherent, emaAligned
-  );
-
-  return {
-    symbol,
-    direction,
-    jds,
-    setupState,
-    confiance,
-    oiImpulse,
-    rr: +plan.rr,
-    plan,
-    rec,
-    reco,
-    rsiCoherent,
-    emaAligned
-  };
-}
-
-function isTradeInvalidated(initial, latest) {
-  if (!latest) return true;
-
-  // Reco plus TAKE —> invalidé
-  if (latest.reco === "AVOID" || latest.reco === "WAIT ENTRY") {
-    return true;
-  }
-
-  // Changement de direction
-  if (latest.direction !== initial.direction) {
-    return true;
-  }
-
-  const oldRec = initial.rec;
-  const newRec = latest.rec;
-
-  // ΔVWAP local : changement de signe ou amplitude extrême
-  const oldDVW = oldRec.deltaVWAPpct;
-  const newDVW = newRec.deltaVWAPpct;
-  if (oldDVW != null && newDVW != null) {
-    if (oldDVW * newDVW < 0) return true;
-    if (Math.abs(newDVW) > 12) return true;
-  }
-
-  // ΔVWAP global extrême
-  const newDVWg = newRec.deltaVWAPgPct;
-  if (newDVWg != null && Math.abs(newDVWg) > 12) {
-    return true;
-  }
-
-  // OI Impulse : purge forte vs direction
-  const oiLabel = latest.oiImpulse.label;
-  if (latest.direction === "LONG" && oiLabel === "purge") return true;
-  if (latest.direction === "SHORT" && oiLabel === "construction forte") return true;
-
-  // RSI ou EMA incohérents maintenant
-  if (!latest.rsiCoherent || !latest.emaAligned) return true;
-
-  // Prix déjà trop loin
-  const priceNow = newRec.last;
-  const entry    = initial.plan.entry;
-  const sl       = initial.plan.sl;
-  const tp1      = initial.plan.tp1;
-
-  if (latest.direction === "LONG") {
-    if (priceNow <= sl) return true;
-    if (tp1 != null && priceNow >= tp1) return true;
-  } else {
-    if (priceNow >= sl) return true;
-    if (tp1 != null && priceNow <= tp1) return true;
-  }
-
-  return false;
-}
-
-function scheduleTradeValidation(initialTrade) {
-  if (initialTrade.reco !== "TAKE — REDUCED" && initialTrade.reco !== "TAKE NOW") {
-    return;
-  }
-
-  setTimeout(async () => {
-    try {
-      const latest = await buildCandidateForSymbol(
-        initialTrade.symbol,
-        initialTrade.direction
-      );
-      const invalid = isTradeInvalidated(initialTrade, latest);
-
-      if (invalid) {
-        const lines = [];
-        
-              if (invalid) {
-        const lines = [];
-        lines.push("⚠️ *JTF Trade invalidé — Validation rapide*");
-        lines.push(`Pair: \`${initialTrade.symbol}\``);
-        lines.push(`Direction: *${initialTrade.direction}*`);
-        lines.push(`Reco initiale: ${initialTrade.reco}`);
-        lines.push("");
-        lines.push("Structure cassée après validation (prix / ΔVWAP / ΔVWAPg / ΔOI / RSI / EMA).");
-        lines.push("➡️ *Ne pas entrer sur ce setup.* Attends le prochain snapshot.");
-
-        await sendTelegram(lines.join("\n"));
-        console.log(`⚠️ Trade invalidé (validator) sur ${initialTrade.symbol} (${initialTrade.direction}).`);
-      } else {
-        console.log(`✅ Trade toujours valide après validation rapide: ${initialTrade.symbol} (${initialTrade.direction}).`);
-      }
-    } catch (e) {
-      console.error("Erreur dans scheduleTradeValidation:", e.message);
-    }
-  }, VALIDATION_DELAY_MS);
-}
-
 // ========= SCAN COMPLET =========
 
 async function scanOnce(){
-  console.log("🔍 Scan JTF v0.9…");
+  console.log("🔍 Scan JTF v0.8.1.3…");
 
   const snapshots = [];
   for(const s of SYMBOLS){
@@ -823,10 +778,10 @@ async function scanOnce(){
     }catch(e){
       console.error("Erreur snapshot", s, e.message);
     }
-    await sleep(120);
+    await sleep(120); // léger spacing API
   }
 
-  // Noisy Market Blocker via BTC
+  // Noisy Market Blocker : on utilise BTC comme proxy du marché global
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
   if(btcRec && isNoisyMarket(btcRec)){
     await sendTelegram(
@@ -849,18 +804,15 @@ BTCUSDT est en zone plate :
     const fusion = fuseJDS(rec);
     if(!fusion) continue;
 
-    const jds         = fusion.jds;
-    const setupState  = getSetupState(jds);
-    const oiImpulse   = getOiImpulse(rec.deltaOIpct, rec.volaPct, rec.tend24);
+    const jds        = fusion.jds;
+    const setupState = getSetupState(jds);
+    const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct);
     const rsiCoherent = isRSICoherent(rec, fusion.direction);
-    const emaAligned  = isEMAAligned(rec, fusion.direction);
-    const confiance   = computeConfidence(rec, fusion, setupState, oiImpulse);
-    const rr          = estimateRR(rec.volaPct);
-    const plan        = buildTradePlan(rec, fusion, jds, rr);
-    const reco        = computeRecommendation(
-      jds, confiance, rr, oiImpulse,
-      rec.deltaVWAPpct, rec.deltaVWAPgPct,
-      setupState, fusion.direction, rsiCoherent, emaAligned
+    const confiance  = computeConfidence(rec, fusion, setupState, oiImpulse);
+    const rr         = estimateRR(rec.volaPct);
+    const plan       = buildTradePlan(rec, fusion, jds, rr);
+    const reco       = computeRecommendation(
+      jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction, rsiCoherent
     );
 
     candidates.push({
@@ -874,11 +826,11 @@ BTCUSDT est en zone plate :
       plan,
       rec,
       reco,
-      rsiCoherent,
-      emaAligned
+      rsiCoherent
     });
   }
 
+  // Filtre : on ne garde pas AVOID
   const tradables = candidates
     .filter(c => c.reco !== "AVOID")
     .sort((a,b)=>{
@@ -896,34 +848,34 @@ BTCUSDT est en zone plate :
       if(b.jds !== a.jds) return b.jds - a.jds;
       return b.confiance - a.confiance;
     })
-    .slice(0,3);
+    .slice(0,3); // max 3 trades
 
   if(!tradables.length){
     await sendTelegram(
 `🔴 *JTF AUTOSELECT — Aucun trade judicieux*
 
-Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance insuffisante, un R:R trop faible ou une structure incohérente (RSI / ΔVWAP / ΔVWAPg / ΔOI / EMA).
+Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance insuffisante, un R:R trop faible ou une structure incohérente (RSI / ΔVWAP / ΔOI).
 → Résultat : *aucun trade recommandé* sur ce snapshot.`
     );
     console.log("ℹ️ Aucun trade judicieux.");
     return;
   }
 
-  // Anti-spam
+  // Vérif anti-spam : au moins un setup nouveau ou dont la reco change
   const fresh = tradables.filter(c => shouldSendFor(c.symbol, c.direction, c.reco));
   if(!fresh.length){
     console.log("⏱️ Pas de nouveaux setups (anti-spam / reco inchangée), on skip l'envoi.");
     return;
   }
 
-  // Trades à valider (TAKE — REDUCED / TAKE NOW) parmi les setups frais
+  // Les trades à valider rapidement (TAKE — REDUCED / TAKE NOW) parmi les setups frais
   const toValidate = fresh.filter(c =>
     c.reco === "TAKE — REDUCED" || c.reco === "TAKE NOW"
   );
 
   // ===== Format Telegram PRO avec emojis =====
   const lines = [];
-  lines.push("📊 *JTF v0.9 AUTOSELECT — Snapshot TOP30*");
+  lines.push("📊 *JTF v0.8.1.3 AUTOSELECT — Snapshot TOP30*");
 
   tradables.forEach((c, idx) => {
     const vola   = c.rec.volaPct ?? 5;
@@ -951,27 +903,26 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
 
   lines.push("");
   lines.push("*Résumé :*");
-  lines.push(`• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse Weighted, RSI, EMA, ΔVWAP/ΔVWAPg, R:R).`);
+  lines.push(`• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, RSI, R:R).`);
   lines.push(`• Meilleur score : *${best.symbol}* (${best.direction}) avec JDS = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.`);
   lines.push("• Aucun trade en dehors de cette liste : pas de FOMO, pas plus de 3 positions issues de ce snapshot.");
-  lines.push("• Si la structure change fortement avant l'entrée (ΔVWAP, ΔVWAPg, RSI, ΔOI, EMA), considère le plan comme *invalidé* et attends le prochain snapshot.");
+  lines.push("• Si la structure change fortement avant l'entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.");
 
   const message = lines.join("\n");
   await sendTelegram(message);
-
-  // Validation rapide pour les trades TAKE — REDUCED / TAKE NOW
+  
+  // 🔍 Validation rapide pour les trades TAKE — REDUCED / TAKE NOW
   for (const t of toValidate) {
     scheduleTradeValidation(t);
   }
-
+  
   console.log("✅ Snapshot JTF envoyé.");
 }
-
 // ========= MAIN LOOP =========
 
 async function main(){
-  console.log("🚀 JTF v0.9 AUTOSELECT — Bot Railway démarré.");
-  await sendTelegram("🟢 JTF v0.9 AUTOSELECT démarré sur Railway (snapshot TOP30 toutes les 5 minutes).");
+  console.log("🚀 JTF v0.8.1.3 AUTOSELECT — Bot Railway démarré.");
+  await sendTelegram("🟢 JTF v0.8.1.3 AUTOSELECT démarré sur Railway (snapshot TOP30 toutes les 5 minutes).");
 
   while(true){
     try{
@@ -984,4 +935,3 @@ async function main(){
 }
 
 main();
-        
