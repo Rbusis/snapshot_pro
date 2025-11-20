@@ -545,7 +545,7 @@ function buildTradePlan(rec, fusion, jds, rr){
 
 // ========= RECOMMANDATION =========
 
-function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent){
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent, rec){
   // Verrou RSI incohérent : on ne prend pas le trade
   if(!rsiCoherent){
     return "AVOID";
@@ -712,7 +712,7 @@ async function buildCandidateForSymbol(symbol, initialDirection) {
   const plan       = buildTradePlan(rec, fusion, jds, rr);
   const reco       = computeRecommendation(
     jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, direction, rsiCoherent
-  );
+  , rec);
 
   return {
     symbol,
@@ -923,7 +923,7 @@ BTCUSDT est en zone plate :
     const plan       = buildTradePlan(rec, fusion, jds, rr);
     const reco       = computeRecommendation(
       jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction, rsiCoherent
-    );
+    , rec);
 
     candidates.push({
       symbol: rec.symbol,
