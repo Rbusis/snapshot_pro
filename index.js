@@ -348,6 +348,32 @@ function getOiImpulse(deltaOIpct, volaPct){
   return { score, label };
 }
 
+// ========= OI IMPULSE WEIGHTED =========
+// Pondère OI Impulse par la tendance structurelle (RSI multi-TF)
+function getWeightedOiImpulse(rec, oiImpulse) {
+  const r = rec.rsi;
+  const r15 = r["15m"], r1h = r["1h"], r4h = r["4h"];
+  if (r15 == null || r1h == null || r4h == null) {
+    return { weighted: oiImpulse.score, mult: 1 };
+  }
+
+  // Calcul d’un TrendScore simple 0 → 1.6
+  let trend = 1;
+  const upBias = (r15 + r1h + r4h) / 3;
+  const downBias = 100 - upBias;
+
+  // Tendance haussière
+  if (upBias > 55) trend += 0.3;
+  if (upBias > 60) trend += 0.3;
+
+  // Tendance baissière
+  if (downBias > 55) trend += 0.25;
+  if (downBias > 60) trend += 0.25;
+
+  const weighted = oiImpulse.score * trend;
+  return { weighted, mult: trend };
+}
+
 // ========= RSI COHERENCE =========
 
 function isRSICoherent(rec, direction){
