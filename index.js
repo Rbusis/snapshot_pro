@@ -456,6 +456,27 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
   else if(oiImpulse.label === "construction légère") conf += 8;
   else if(oiImpulse.label === "purge") conf -= 15;
 
+    // ===== MUST-HAVE : ΔVWAP Global (structure profonde du flux) =====
+  const dVG = rec.deltaVWAPgPct;
+  if (dVG != null) {
+
+    // Structure alignée → boost
+    if (fusion.direction === "LONG" && dVG < -0.3) {
+      conf += 8;
+    }
+    if (fusion.direction === "SHORT" && dVG > 0.3) {
+      conf += 8;
+    }
+
+    // Structure opposée → légère pénalité
+    if (fusion.direction === "LONG" && dVG > 1.0) {
+      conf -= 5;
+    }
+    if (fusion.direction === "SHORT" && dVG < -1.0) {
+      conf -= 5;
+    }
+  }
+  
   // Volatilité cohérente
   if(vola!=null){
     if(vola >= 2 && vola <= 20) conf += 5;
