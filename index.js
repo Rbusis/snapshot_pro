@@ -764,11 +764,32 @@ function isTradeInvalidated(initial, latest) {
   const oiLabel = latest.oiImpulse.label;
   if (latest.direction === "LONG" && oiLabel === "purge") return true;
   if (latest.direction === "SHORT" && oiLabel === "construction forte") return true;
+  
+  // 5) ΔVWAP Global (structure HTF) contradictoire
+  const dVG = latest.rec.deltaVWAPgPct;
 
-  // 5) RSI incohérent maintenant
+  if (dVG != null) {
+    // Contretendance structurelle forte → annulation
+    if (latest.direction === "LONG" && dVG > 1.2) {
+      return true;
+    }
+    if (latest.direction === "SHORT" && dVG < -1.2) {
+      return true;
+    }
+
+    // Structure devient opposée depuis l’alerte → annulation
+    const oldGVW = initial.rec.deltaVWAPgPct;
+    if (oldGVW != null) {
+      // Passage de aligné → opposé = signal cassé
+      if (initial.direction === "LONG"  && oldGVW <= 0.3 && dVG > 0.8) return true;
+      if (initial.direction === "SHORT" && oldGVW >= -0.3 && dVG < -0.8) return true;
+    }
+  }
+
+  // 6) RSI incohérent maintenant
   if (!latest.rsiCoherent) return true;
 
-  // 6) Prix déjà trop loin : SL touché ou TP1 déjà fait avant entrée
+  // 7) Prix déjà trop loin : SL touché ou TP1 déjà fait avant entrée
   const priceNow = newRec.last;
   const entry    = initial.plan.entry;
   const sl       = initial.plan.sl;
