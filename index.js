@@ -285,6 +285,14 @@ if (vwap1h && vwap4h) {
   const MMS_long  = toScore100(MMS_long_raw);
   const MMS_short = toScore100(MMS_short_raw);
 
+  console.log("SNAPSHOT", symbol, JSON.stringify({
+  symbol,
+  last,
+  deltaVWAPpct,
+  deltaVWAPgPct,
+  deltaOIpct
+}));
+  
   return {
     symbol,
     last,
