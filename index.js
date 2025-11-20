@@ -28,8 +28,8 @@ const SYMBOLS = [
 
 // ΔOI persisté uniquement en RAM (reset à chaque redéploiement)
 const prevOI     = new Map();   // symbol -> OI précédent
-// Anti-spam par paire/direction
-const lastAlerts = new Map();   // "symbol-direction" -> timestamp
+// Anti-spam par paire/direction (stocke aussi la dernière reco)
+const lastAlerts = new Map();   // "symbol-direction" -> { ts, reco }
 
 // ========= UTILS =========
 
@@ -345,6 +345,24 @@ function getOiImpulse(deltaOIpct, volaPct){
   return { score, label };
 }
 
+// ========= RSI COHERENCE =========
+
+function isRSICoherent(rec, direction){
+  const r = rec.rsi;
+  const r15 = r["15m"];
+  const r1h = r["1h"];
+  const r4h = r["4h"];
+  if(r15==null || r1h==null || r4h==null) return true; // on ne pénalise pas si manque de data
+
+  if(direction === "LONG"){
+    // structure ascendante
+    return r15 <= r1h && r1h <= r4h;
+  }else{
+    // SHORT : structure descendante
+    return r15 >= r1h && r1h >= r4h;
+  }
+}
+
 // ========= CONFIANCE % =========
 
 function computeConfidence(rec, fusion, setupState, oiImpulse){
@@ -372,7 +390,7 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
     }
   }
 
-  // RSI multi-TF
+  // RSI multi-TF gradient
   if(r["15m"]!=null && r["1h"]!=null && r["4h"]!=null){
     let scoreRSI = 0;
     const frames = [r["15m"],r["1h"],r["4h"]];
@@ -388,6 +406,11 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
       }
     }
     conf += scoreRSI * 4; // -12..+12
+  }
+
+  // RSI cohérence structurelle
+  if(!isRSICoherent(rec, dir)){
+    conf -= 15; // grosse pénalité
   }
 
   // OI Impulse
@@ -463,7 +486,12 @@ function buildTradePlan(rec, fusion, jds, rr){
 
 // ========= RECOMMANDATION =========
 
-function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction){
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent){
+  // Verrou RSI incohérent : on ne prend pas le trade
+  if(!rsiCoherent){
+    return "AVOID";
+  }
+
   let reco;
 
   // Règles d'état
@@ -481,8 +509,9 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
   if(rr < 1.2) reco = "AVOID";
 
   // Confiance globale
-  if(conf < 70) reco = "AVOID";
-  else if(conf >= 70 && conf <= 79 && reco!=="AVOID"){
+  if(conf < 70) {
+    reco = "AVOID";
+  } else if(conf >= 70 && conf <= 79 && reco!=="AVOID"){
     reco = "WAIT ENTRY";
   }
 
@@ -500,7 +529,7 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
     }
   }
 
-  // Verrou TAKE — REDUCED
+  // Verrou TAKE — REDUCED (un peu plus souple)
   if(reco==="TAKE — REDUCED"){
     const ok =
       jds >= 90 && jds <= 94 &&
@@ -525,14 +554,48 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
   return reco;
 }
 
+// ========= NOISY MARKET BLOCKER =========
+
+function isNoisyMarket(rec){
+  const vola = rec.volaPct;
+  const dVW  = rec.deltaVWAPpct;
+  const tend = rec.tend24;
+  const dOI  = rec.deltaOIpct;
+  if(vola==null || dVW==null || tend==null || dOI==null) return false;
+
+  const condVola = vola < 2;
+  const condVW   = dVW >= -0.5 && dVW <= 0.5;
+  const condTend = tend >= -15 && tend <= 15;
+  const condOI   = dOI >= -2 && dOI <= 2;
+
+  return condVola && condVW && condTend && condOI;
+}
+
 // ========= ANTI-SPAM =========
 
-function shouldSendFor(symbol, direction){
+function shouldSendFor(symbol, direction, reco){
   const key = `${symbol}-${direction}`;
   const now = Date.now();
-  const last = lastAlerts.get(key) ?? 0;
-  if(now - last < MIN_ALERT_DELAY_MS) return false;
-  lastAlerts.set(key, now);
+  const last = lastAlerts.get(key);
+
+  // jamais envoyé : on envoie
+  if(!last){
+    lastAlerts.set(key, { ts: now, reco });
+    return true;
+  }
+
+  // si reco a changé (ex: WAIT -> TAKE REDUCED), on envoie même si délai non écoulé
+  if(last.reco !== reco){
+    lastAlerts.set(key, { ts: now, reco });
+    return true;
+  }
+
+  // même reco, on applique le délai anti-spam
+  if(now - last.ts < MIN_ALERT_DELAY_MS){
+    return false;
+  }
+
+  lastAlerts.set(key, { ts: now, reco });
   return true;
 }
 
@@ -584,6 +647,24 @@ async function scanOnce(){
     await sleep(120); // léger spacing API
   }
 
+  // Noisy Market Blocker : on utilise BTC comme proxy du marché global
+  const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
+  if(btcRec && isNoisyMarket(btcRec)){
+    await sendTelegram(
+`🔴 *JTF AUTOSELECT — Marché sans direction*
+
+BTCUSDT est en zone plate :
+• Vola ≈ ${btcRec.volaPct != null ? btcRec.volaPct.toFixed(2) : "n/a"}%
+• ΔVWAP ≈ ${btcRec.deltaVWAPpct != null ? btcRec.deltaVWAPpct.toFixed(2) : "n/a"}%
+• Tend ≈ ${btcRec.tend24 != null ? btcRec.tend24.toFixed(2) : "n/a"}%
+• ΔOI ≈ ${btcRec.deltaOIpct != null ? btcRec.deltaOIpct.toFixed(2) : "n/a"}%
+
+→ Aucun setup judicieux sur ce snapshot (marché bruyant / sans flux directionnel).`
+    );
+    console.log("ℹ️ Marché sans direction (noisy blocker).");
+    return;
+  }
+
   const candidates = [];
   for(const rec of snapshots){
     const fusion = fuseJDS(rec);
@@ -592,11 +673,12 @@ async function scanOnce(){
     const jds        = fusion.jds;
     const setupState = getSetupState(jds);
     const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+    const rsiCoherent = isRSICoherent(rec, fusion.direction);
     const confiance  = computeConfidence(rec, fusion, setupState, oiImpulse);
     const rr         = estimateRR(rec.volaPct);
     const plan       = buildTradePlan(rec, fusion, jds, rr);
     const reco       = computeRecommendation(
-      jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction
+      jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction, rsiCoherent
     );
 
     candidates.push({
@@ -609,7 +691,8 @@ async function scanOnce(){
       rr: +plan.rr,
       plan,
       rec,
-      reco
+      reco,
+      rsiCoherent
     });
   }
 
@@ -637,17 +720,17 @@ async function scanOnce(){
     await sendTelegram(
 `🔴 *JTF AUTOSELECT — Aucun trade judicieux*
 
-Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance < 70% ou un R:R insuffisant.
+Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance insuffisante, un R:R trop faible ou une structure incohérente (RSI / ΔVWAP / ΔOI).
 → Résultat : *aucun trade recommandé* sur ce snapshot.`
     );
     console.log("ℹ️ Aucun trade judicieux.");
     return;
   }
 
-  // Vérif anti-spam : au moins un nouveau setup
-  const fresh = tradables.filter(c => shouldSendFor(c.symbol, c.direction));
+  // Vérif anti-spam : au moins un setup nouveau ou dont la reco change
+  const fresh = tradables.filter(c => shouldSendFor(c.symbol, c.direction, c.reco));
   if(!fresh.length){
-    console.log("⏱️ Pas de nouveaux setups (anti-spam), on skip l'envoi.");
+    console.log("⏱️ Pas de nouveaux setups (anti-spam / reco inchangée), on skip l'envoi.");
     return;
   }
 
@@ -681,7 +764,7 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance <
 
   lines.push("");
   lines.push("*Résumé :*");
-  lines.push(`• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, R:R).`);
+  lines.push(`• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, RSI, R:R).`);
   lines.push(`• Meilleur score : *${best.symbol}* (${best.direction}) avec JDS = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.`);
   lines.push("• Aucun trade en dehors de cette liste : pas de FOMO, pas plus de 3 positions issues de ce snapshot.");
   lines.push("• Si la structure change fortement avant l'entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.");
