@@ -251,9 +251,17 @@ async function processSymbol(symbol){
 
   const posDay  = positionInDay(last,low24,high24);
 
-  const vwap1h    = vwap(c1h.slice(-48));
-  const deltaVWAP = (vwap1h && last) ? percent(last,vwap1h) : null;
+  // VWAP 1h local
+const vwap1h    = vwap(c1h.slice(-48));
+const deltaVWAP = (vwap1h && last) ? percent(last, vwap1h) : null;
 
+// ===== VWAP GLOBAL 4h vs 1h =====
+const vwap4h = vwap(c4h.slice(-48));     // VWAP 4h
+
+let deltaVWAPg = null;
+if (vwap1h && vwap4h) {
+  deltaVWAPg = ((vwap1h / vwap4h) - 1) * 100;
+}
   const fundingRate = fr ? +fr.fundingRate * 100 : null;
 
   // ===== MMS (ex-JDS du snapshot, long/short séparés) =====
@@ -287,6 +295,7 @@ async function processSymbol(symbol){
     posDay,
     spreadPct: spreadPct!=null ? num(spreadPct,4) : null,
     deltaVWAPpct: deltaVWAP!=null ? num(deltaVWAP,4) : null,
+    deltaVWAPgPct: deltaVWAPg != null ? num(deltaVWAPg,4) : null,
     deltaOIpct:   deltaOI!=null   ? num(deltaOI,3)   : null,
     fundingRatePct: fundingRate!=null ? num(fundingRate,6) : null,
     rsi: {
