@@ -14,6 +14,9 @@ const SCAN_INTERVAL_MS   = 5 * 60_000;
 // Anti-spam : délai min entre 2 envois pour même paire/direction
 const MIN_ALERT_DELAY_MS = 15 * 60_000;
 
+// Délai de re-validation des trades TAKE (en ms)
+const VALIDATION_DELAY_MS = 30_000; // 30 secondes
+
 // TOP30 Bitget USDT perp
 const SYMBOLS = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
@@ -599,6 +602,137 @@ function shouldSendFor(symbol, direction, reco){
   return true;
 }
 
+// ========= TRADE VALIDATOR (TAKE — REDUCED / TAKE NOW) =========
+
+// Recalcule un "candidate" complet pour une paire unique
+async function buildCandidateForSymbol(symbol, initialDirection) {
+  const rec = await processSymbol(symbol);
+  if (!rec) return null;
+
+  const fusion = fuseJDS(rec);
+  if (!fusion) return null;
+
+  // si la direction change complètement, c'est déjà un gros warning
+  const direction = fusion.direction;
+  const jds        = fusion.jds;
+  const setupState = getSetupState(jds);
+  const oiImpulse  = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+  const rsiCoherent = isRSICoherent(rec, direction);
+  const confiance  = computeConfidence(rec, fusion, setupState, oiImpulse);
+  const rr         = estimateRR(rec.volaPct);
+  const plan       = buildTradePlan(rec, fusion, jds, rr);
+  const reco       = computeRecommendation(
+    jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, direction, rsiCoherent
+  );
+
+  return {
+    symbol,
+    direction,
+    jds,
+    setupState,
+    confiance,
+    oiImpulse,
+    rr: +plan.rr,
+    plan,
+    rec,
+    reco,
+    rsiCoherent
+  };
+}
+
+// Vérifie si le trade initial est invalidé par la nouvelle structure
+function isTradeInvalidated(initial, latest) {
+  if (!latest) return true; // pas de data = on préfère annuler
+
+  // 1) Si la reco n'est plus TAKE — REDUCED / TAKE NOW → on annule
+  if (latest.reco === "AVOID" || latest.reco === "WAIT ENTRY") {
+    return true;
+  }
+
+  // 2) Changement de direction = invalidation
+  if (latest.direction !== initial.direction) {
+    return true;
+  }
+
+  const oldRec = initial.rec;
+  const newRec = latest.rec;
+
+  // 3) Changement de signe sur ΔVWAP ou amplitude trop extrême
+  const oldDVW = oldRec.deltaVWAPpct;
+  const newDVW = newRec.deltaVWAPpct;
+  if (oldDVW != null && newDVW != null) {
+    if (oldDVW * newDVW < 0) {
+      // signe opposé → retournement brutal
+      return true;
+    }
+    if (Math.abs(newDVW) > 10) {
+      // trop extrême par rapport à ton style
+      return true;
+    }
+  }
+
+  // 4) OI Impulse : purge forte vs direction
+  const oiLabel = latest.oiImpulse.label;
+  if (latest.direction === "LONG" && oiLabel === "purge") return true;
+  if (latest.direction === "SHORT" && oiLabel === "construction forte") return true;
+
+  // 5) RSI incohérent maintenant
+  if (!latest.rsiCoherent) return true;
+
+  // 6) Prix déjà trop loin : SL touché ou TP1 déjà fait avant entrée
+  const priceNow = newRec.last;
+  const entry    = initial.plan.entry;
+  const sl       = initial.plan.sl;
+  const tp1      = initial.plan.tp1;
+
+  if (latest.direction === "LONG") {
+    if (priceNow <= sl) return true;    // déjà invalidé
+    if (tp1 != null && priceNow >= tp1) return true; // mouvement déjà réalisé
+  } else {
+    if (priceNow >= sl) return true;
+    if (tp1 != null && priceNow <= tp1) return true;
+  }
+
+  return false;
+}
+
+// Programme une validation rapide du trade après VALIDATION_DELAY_MS
+function scheduleTradeValidation(initialTrade) {
+  // On ne valide que TAKE — REDUCED et TAKE NOW
+  if (initialTrade.reco !== "TAKE — REDUCED" && initialTrade.reco !== "TAKE NOW") {
+    return;
+  }
+
+  setTimeout(async () => {
+    try {
+      const latest = await buildCandidateForSymbol(
+        initialTrade.symbol,
+        initialTrade.direction
+      );
+      const invalid = isTradeInvalidated(initialTrade, latest);
+
+      if (invalid) {
+        // Message simple : le plan n'est plus valide
+        const lines = [];
+        lines.push("⚠️ *JTF Trade invalidé — Validation rapide*");
+        lines.push(`Pair: \`${initialTrade.symbol}\``);
+        lines.push(`Direction: *${initialTrade.direction}*`);
+        lines.push(`Reco initiale: ${initialTrade.reco}`);
+        lines.push("");
+        lines.push("Structure cassée après validation (prix / ΔVWAP / ΔOI / RSI).");
+        lines.push("➡️ *Ne pas entrer sur ce setup.* Attends le prochain snapshot.");
+
+        await sendTelegram(lines.join("\n"));
+        console.log(`⚠️ Trade invalidé (validator) sur ${initialTrade.symbol} (${initialTrade.direction}).`);
+      } else {
+        console.log(`✅ Trade toujours valide après validation rapide: ${initialTrade.symbol} (${initialTrade.direction}).`);
+      }
+    } catch (e) {
+      console.error("Erreur dans scheduleTradeValidation:", e.message);
+    }
+  }, VALIDATION_DELAY_MS);
+}
+
 // ========= TELEGRAM =========
 
 async function sendTelegram(text){
@@ -734,6 +868,11 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
     return;
   }
 
+  // Les trades à valider rapidement (TAKE — REDUCED / TAKE NOW) parmi les setups frais
+  const toValidate = fresh.filter(c =>
+    c.reco === "TAKE — REDUCED" || c.reco === "TAKE NOW"
+  );
+
   // ===== Format Telegram PRO avec emojis =====
   const lines = [];
   lines.push("📊 *JTF v0.8.1.3 AUTOSELECT — Snapshot TOP30*");
@@ -771,9 +910,14 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
 
   const message = lines.join("\n");
   await sendTelegram(message);
+  
+  // 🔍 Validation rapide pour les trades TAKE — REDUCED / TAKE NOW
+  for (const t of toValidate) {
+    scheduleTradeValidation(t);
+  }
+  
   console.log("✅ Snapshot JTF envoyé.");
 }
-
 // ========= MAIN LOOP =========
 
 async function main(){
