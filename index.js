@@ -288,9 +288,9 @@ if (vwap1h && vwap4h) {
   console.log("SNAPSHOT", symbol, JSON.stringify({
   symbol,
   last,
-  deltaVWAPpct,
-  deltaVWAPgPct,
-  deltaOIpct
+  deltaVWAPpct: deltaVWAP != null ? +deltaVWAP.toFixed(4) : null,
+  deltaVWAPgPct: deltaVWAPg != null ? +deltaVWAPg.toFixed(4) : null,
+  deltaOIpct: deltaOI != null ? +deltaOI.toFixed(3) : null
 }));
   
   return {
