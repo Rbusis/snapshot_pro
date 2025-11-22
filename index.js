@@ -41,10 +41,8 @@ const MAX_LATE_SHORT_VWAP_PCT = -12; // en dessous de -12% : short tardif
 const MAX_LATE_LONG_VWAP_PCT  =  12; // au dessus de +12% : long tardif
 
 // ΔOI toléré pour un short / long
-const MAX_OI_FOR_SHORT_OK =  0.25;   // ΔOI <= +0.25% → short encore OK
-const MIN_OI_FOR_LONG_OK  = -0.25;   // ΔOI >= -0.25% → long encore OK
-
-// ========= MÉMOIRE =========
+const MAX_OI_FOR_SHORT_OK =  0.6;    // ΔOI <= +0.6% → short encore OK
+const MIN_OI_FOR_LONG_OK  = -0.6;    // ΔOI >= -0.6% → long encore OK// ========= MÉMOIRE =========
 
 // ΔOI persisté uniquement en RAM (reset à chaque redéploiement)
 const prevOI     = new Map();   // symbol -> OI précédent
@@ -570,7 +568,7 @@ function buildTradePlan(rec, fusion, jds, rr){
 
 function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent, rec){
 
-  // ΔOI soft-lock (v0.8.2)
+  // ΔOI soft-lock (v0.8.2-b)
   const dOI = rec.deltaOIpct;
   if (direction === "SHORT" && dOI != null && dOI > MAX_OI_FOR_SHORT_OK) {
     return "AVOID";
@@ -599,25 +597,33 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
   }
 
   // R:R minimal assoupli
-  if(rr < 1.1) reco = "AVOID";
+  if(rr < 1.05) reco = "AVOID";
 
-  // Confiance globale (moins stricte)
-  if(conf < 55) {
-    reco = "AVOID";
-  } else if(conf >= 55 && conf < 65 && reco!=="AVOID"){
-    reco = "WAIT ENTRY";
+  // 🎯 Gate de confiance assouplie
+  // Avant : conf < 55 → AVOID (trop dur)
+  // Maintenant :
+  // - conf < 45  → AVOID
+  // - [45,55)    → OK mais jamais TAKE, max WAIT ENTRY
+  if(conf < 45) {
+    return "AVOID";
+  }
+  if(conf >= 45 && conf < 55) {
+    // On laisse les WAIT ENTRY vivre, mais on enlève les TAKE
+    if (reco === "TAKE NOW" || reco === "TAKE — REDUCED") {
+      reco = "WAIT ENTRY";
+    }
   }
 
-  // Unlock TAKE NOW / TAKE — REDUCED (v0.8.2)
+  // Unlock TAKE NOW / TAKE — REDUCED (v0.8.2-b)
   if(reco==="TAKE NOW"){
     const ok =
       jds >= MIN_JDS_TRADE_NOW &&
-      conf >= 75 &&
-      rr >= 1.3 &&
-      dVW!=null && Math.abs(dVW) <= 12 &&
+      conf >= 70 &&             // 75 → 70
+      rr >= 1.2 &&              // 1.3 → 1.2
+      dVW!=null && Math.abs(dVW) <= 14 &&
       oiImpulse.label !== "purge";
     if(!ok){
-      if(jds >= MIN_JDS_TRADE_NOW && conf >= 70) reco = "TAKE — REDUCED";
+      if(jds >= MIN_JDS_TRADE_NOW && conf >= 60) reco = "TAKE — REDUCED";
       else reco = "WAIT ENTRY";
     }
   }
@@ -625,7 +631,7 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
   if(reco==="TAKE — REDUCED"){
     const ok =
       jds >= MIN_JDS_WAIT_ENTRY &&
-      conf >= 65 &&
+      conf >= 60 &&             // 65 → 60
       oiImpulse.label !== "purge";
     if(!ok) reco = "WAIT ENTRY";
   }
@@ -638,23 +644,15 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
     reco = "AVOID";
   }
 
-  // ΔVWAP Global (structure HTF) : assoupli
+  // ΔVWAP Global (structure HTF) : légère gestion
   const dVG = rec.deltaVWAPgPct;
   if (dVG != null) {
 
-    // Contretendance forte → on évite les TAKE NOW agressifs
-    if (direction === "LONG"  && dVG > 2.0 && reco === "TAKE NOW") {
-      reco = "TAKE — REDUCED";
-    }
-    if (direction === "SHORT" && dVG < -2.0 && reco === "TAKE NOW") {
-      reco = "TAKE — REDUCED";
-    }
-
-    // Si structure vraiment contre, on rétrograde à WAIT ENTRY
-    if (direction === "LONG"  && dVG > 3.0 && reco !== "AVOID") {
+    // Contretendance très forte → on évite les TAKE NOW agressifs
+    if (direction === "LONG"  && dVG > 3.0 && (reco === "TAKE NOW" || reco === "TAKE — REDUCED")) {
       reco = "WAIT ENTRY";
     }
-    if (direction === "SHORT" && dVG < -3.0 && reco !== "AVOID") {
+    if (direction === "SHORT" && dVG < -3.0 && (reco === "TAKE NOW" || reco === "TAKE — REDUCED")) {
       reco = "WAIT ENTRY";
     }
   }
@@ -943,6 +941,18 @@ BTCUSDT est en zone plate :
       rsiCoherent
     });
   }
+  
+      console.log("CAND",
+      rec.symbol,
+      "dir=", fusion.direction,
+      "jds=", jds,
+      "state=", setupState,
+      "conf=", confiance,
+      "reco=", reco,
+      "dVW=", rec.deltaVWAPpct,
+      "dVG=", rec.deltaVWAPgPct,
+      "dOI=", rec.deltaOIpct
+    );
 
   // Filtre : on ne garde pas AVOID
   const tradables = candidates
