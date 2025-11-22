@@ -713,6 +713,11 @@ async function buildCandidateForSymbol(symbol, initialDirection) {
   if (!rec) return null;
 
   const fusion = fuseJDS(rec);
+  // 🔧 Correctif direction v0.8.2-b
+if (fusion.direction === "LONG") {
+  if (rec.deltaVWAPpct <= -1.2) fusion.direction = "SHORT";
+  if (rec.deltaVWAPgPct <= -2)  fusion.direction = "SHORT";
+}
   if (!fusion) return null;
 
   const direction = fusion.direction;
