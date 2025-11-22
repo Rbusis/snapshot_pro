@@ -13,7 +13,7 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 
 // Anti-spam : délai min entre 2 envois pour même paire/direction
-// v0.8.2 : plus souple (3 min)
+// v0.8.2 : plus souple (3 min) 
 const MIN_ALERT_DELAY_MS = 3 * 60_000;
 
 // Délai de re-validation des trades TAKE (en ms)
