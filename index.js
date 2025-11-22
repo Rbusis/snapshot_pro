@@ -940,19 +940,20 @@ BTCUSDT est en zone plate :
       reco,
       rsiCoherent
     });
+    console.log(
+  "CAND",
+  rec.symbol,
+  "dir=", fusion.direction,
+  "jds=", jds,
+  "state=", setupState,
+  "conf=", confiance,
+  "reco=", reco,
+  "dVW=", rec.deltaVWAPpct,
+  "dVG=", rec.deltaVWAPgPct,
+  "dOI=", rec.deltaOIpct
+);
   }
   
-      console.log("CAND",
-      rec.symbol,
-      "dir=", fusion.direction,
-      "jds=", jds,
-      "state=", setupState,
-      "conf=", confiance,
-      "reco=", reco,
-      "dVW=", rec.deltaVWAPpct,
-      "dVG=", rec.deltaVWAPgPct,
-      "dOI=", rec.deltaOIpct
-    );
 
   // Filtre : on ne garde pas AVOID
   const tradables = candidates
