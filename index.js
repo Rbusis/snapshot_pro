@@ -3,6 +3,17 @@
 // Sortie : blocs Telegram avec emojis, max 3 trades, aucun fichier écrit.
 
 import fetch from "node-fetch";
+import http from "http"; // <--- AJOUT IMPORTANT POUR RAILWAY
+
+// ========= RAILWAY KEEPALIVE =========
+// Empêche Railway de tuer le bot (erreur SIGTERM)
+const PORT = process.env.PORT || 8080;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("JTF Bot is running...");
+}).listen(PORT, () => {
+  console.log(`🛡️ Serveur KeepAlive écoute sur le port ${PORT}`);
+});
 
 // ========= CONFIG =========
 
@@ -887,7 +898,9 @@ function formatRecoWithEmoji(reco){
 async function scanOnce(){
   console.log("🔍 Scan JTF v0.8.2…");
 
-    // --- SCAN PAR PAQUETS (BATCHING) ---
+  const snapshots = [];
+
+  // --- SCAN PAR PAQUETS (BATCHING) ---
   const BATCH_SIZE = 5; // On scanne 5 paires en même temps pour aller vite
   
   for (let i = 0; i < SYMBOLS.length; i += BATCH_SIZE) {
@@ -912,33 +925,6 @@ async function scanOnce(){
     }
   }
   // -----------------------------------
-
-
-  // Remplacer l'ancienne boucle "for" par ceci :
-  
-  const BATCH_SIZE = 5; // On traite 5 paires en même temps
-  for (let i = 0; i < SYMBOLS.length; i += BATCH_SIZE) {
-    const batch = SYMBOLS.slice(i, i + BATCH_SIZE);
-    
-    // On lance les 5 analyses en parallèle
-    const results = await Promise.all(
-      batch.map(symbol => processSymbol(symbol).catch(e => {
-        console.error(`Erreur sur ${symbol}:`, e.message);
-        return null;
-      }))
-    );
-
-    // On ajoute les résultats valides
-    for (const res of results) {
-      if (res) snapshots.push(res);
-    }
-
-    // Petite pause entre les paquets pour ménager l'API Bitget
-    if (i + BATCH_SIZE < SYMBOLS.length) {
-      await sleep(1000); 
-    }
-  }
-
 
   // Noisy Market Blocker : on utilise BTC comme proxy du marché global
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
