@@ -3,6 +3,8 @@
 // LOGIQUE : Momentum Sniper (VolRatio > 2.5, Wicks Filters, VWAP Gaps)
 
 import fetch from "node-fetch";
+import fs from "fs";
+import top30 from "./config/top30.json" assert { type: "json" };
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
