@@ -1,5 +1,5 @@
-// discovery.js — JTF DISCOVERY v0.7 (Smart Entry + Levier)
-// Ajout du calcul "Entry Limit" et "Levier" pour optimiser les entrées.
+// discovery.js — JTF DISCOVERY v0.8 (Debugged)
+// Correction SyntaxError + Sécurité BTC Paranoïaque (Si pas de BTC, pas de trade).
 
 import fetch from "node-fetch";
 
@@ -31,8 +31,11 @@ async function getBTCTrend() {
   try {
     const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=BTCUSDT_UMCBL&granularity=3600&limit=5`);
     if(!j?.data || j.data.length < 2) return null;
-    const current = j.data[j.data.length - 1];
-    return ((+current[4] - +current[1]) / +current[1]) * 100;
+    const current = j.data[j.data.length - 1]; // Bougie actuelle
+    const open = +current[1];
+    const close = +current[4];
+    if(!open) return 0;
+    return ((close - open) / open) * 100;
   } catch { return null; }
 }
 
@@ -89,7 +92,10 @@ function analyzeCandidate(rec, btcChange) {
   let direction=null, score=0, reason="";
 
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    if (btcChange != null && btcChange < BTC_DUMP_THRESHOLD) return null; // Sécurité BTC
+    // SÉCURITÉ BTC RENFORCÉE
+    if (btcChange == null) return null; // Si BTC inconnu, on ne prend pas de risque
+    if (btcChange < BTC_DUMP_THRESHOLD) return null; // Si BTC chute, on annule
+
     if (rec.obScore >= 0) {
       let s=50;
       if(rec.volRatio>2.0) s+=20; else if(rec.volRatio>1.5) s+=10;
@@ -107,15 +113,9 @@ function analyzeCandidate(rec, btcChange) {
 
   if (!direction) return null;
 
-  // --- SMART ENTRY CALCULATION ---
+  // Smart Entry
   const pullbackPct = clamp(rec.volaPct / 20, 0.3, 1.0); 
-  
-  let limitEntry;
-  if (direction === "LONG") {
-    limitEntry = rec.last * (1 - pullbackPct/100);
-  } else {
-    limitEntry = rec.last * (1 + pullbackPct/100);
-  }
+  let limitEntry = direction === "LONG" ? rec.last * (1 - pullbackPct/100) : rec.last * (1 + pullbackPct/100);
 
   const riskMult = 1.8; 
   const riskPct = clamp((rec.volaPct/5)*riskMult, 1.2, 6.0);
@@ -146,10 +146,15 @@ async function scanDiscovery(){
   const now = Date.now();
   const btcChange = await getBTCTrend();
   
+  if (btcChange == null) {
+    console.log("⚠️ BTC Indisponible (API error) -> Sécurité : Scan Discovery annulé.");
+    return; // ON ARRÊTE TOUT SI PAS DE BTC
+  }
+
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DISCOVERY_SYMBOLS.length === 0){
     DISCOVERY_SYMBOLS = await updateDiscoveryList(); lastSymbolUpdate = now;
   }
-  console.log(`🚀 Discovery Scan | BTC: ${btcChange?.toFixed(2)}%`);
+  console.log(`🚀 Discovery Scan | BTC: ${btcChange.toFixed(2)}%`);
   
   const BATCH_SIZE = 5; const candidates = [];
   for(let i=0; i<DISCOVERY_SYMBOLS.length; i+=BATCH_SIZE){
@@ -165,11 +170,9 @@ async function scanDiscovery(){
     const emoji = c.direction === "LONG" ? "🚀" : "🪂";
     let footer = "_Mode Elite (80+) | Smart Entry_";
     if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Setup Majeur";
-
-    // Calcul du levier conseillé (Inverse du risque)
     const levierConseille = c.riskPct > 4 ? "2x" : (c.riskPct > 2.5 ? "3x" : "4x");
 
-    const msg = `⚡ *JTF DISCOVERY v0.7 (Smart Entry)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    const msg = `⚡ *JTF DISCOVERY v0.8 (Debug)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal Discovery envoyé: ${c.symbol}`);
@@ -177,9 +180,9 @@ async function scanDiscovery(){
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.7 démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY v0.7 (Smart Entry) activé.*");
-  while(true){ try { await scanDiscovery(); } catch(e) {} await sleep(SCAN_INTERVAL_MS); }
+  console.log("🔥 JTF DISCOVERY v0.8 (Debug) démarré.");
+  await sendTelegram("🔥 *JTF DISCOVERY v0.8 (Sécurité BTC Debug) activé.*");
+  while(true){ try { await scanDiscovery(); } catch(e) { console.error("Discovery error:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
 export const startDiscovery = main;
