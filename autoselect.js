@@ -1,6 +1,6 @@
 // index.js — JTF v0.8.2 AUTOSELECT (Railway / Telegram)
 // TOP30 Bitget USDT Perp, MMS -> JDS fusionné, Setup State, Confiance, R:R, Reco
-// Sortie : blocs Telegram avec emojis, max 3 trades, aucun fichier écrit.
+// Sortie : Uniquement les signaux "TAKE". Silence sinon.
 
 import fetch from "node-fetch";
 
@@ -13,14 +13,12 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 
 // Anti-spam : délai min entre 2 envois pour même paire/direction
-// v0.8.2 : plus souple (3 min) 
 const MIN_ALERT_DELAY_MS = 3 * 60_000;
 
-// Délai de re-validation des trades TAKE (en ms)
-// v0.8.2 : désactivé (0) pour ne plus tuer les setups
+// Délai de re-validation (désactivé)
 const VALIDATION_DELAY_MS = 0;
 
-// TOP30 Bitget USDT perp
+// TOP30 Bitget USDT perp (Liste Fixe)
 const SYMBOLS = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -30,24 +28,18 @@ const SYMBOLS = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
-// ------- Seuils v0.8.2 (plus permissifs) -------
+// ------- Seuils v0.8.2 -------
 
-// JDS minimum pour les états
 const MIN_JDS_TRADE_NOW   = 65;
 const MIN_JDS_WAIT_ENTRY  = 45;
 
-// "Trop tard" pour long/short (ΔVWAP)
-const MAX_LATE_SHORT_VWAP_PCT = -12; // en dessous de -12% : short tardif
-const MAX_LATE_LONG_VWAP_PCT  =  12; // au dessus de +12% : long tardif
+const MAX_OI_FOR_SHORT_OK =  0.6;    
+const MIN_OI_FOR_LONG_OK  = -0.6;    
 
-// ΔOI toléré pour un short / long
-const MAX_OI_FOR_SHORT_OK =  0.6;    // ΔOI <= +0.6% → short encore OK
-const MIN_OI_FOR_LONG_OK  = -0.6;    // ΔOI >= -0.6% → long encore OK// ========= MÉMOIRE =========
+// ========= MÉMOIRE =========
 
-// ΔOI persisté uniquement en RAM (reset à chaque redéploiement)
-const prevOI     = new Map();   // symbol -> OI précédent
-// Anti-spam par paire/direction (stocke aussi la dernière reco)
-const lastAlerts = new Map();   // "symbol-direction" -> { ts, reco }
+const prevOI     = new Map();   
+const lastAlerts = new Map();   
 
 // ========= UTILS =========
 
@@ -137,17 +129,6 @@ async function getOI(symbol){
 // ========= INDICATEURS =========
 
 function percent(a,b){ return b ? (a/b - 1)*100 : null; }
-
-function ema(arr,period,acc=x=>x){
-  if(!arr.length) return null;
-  const k = 2/(period+1);
-  let e = acc(arr[0]);
-  for(let i=1;i<arr.length;i++){
-    const v = acc(arr[i]);
-    e = v*k + e*(1-k);
-  }
-  return e;
-}
 
 function rsi(closes,p=14){
   if(closes.length<p+1) return null;
@@ -280,7 +261,7 @@ async function processSymbol(symbol){
 
   const fundingRate = fr ? +fr.fundingRate * 100 : null;
 
-  // ===== MMS (ex-JDS du snapshot, long/short séparés) =====
+  // ===== MMS (ex-JDS du snapshot) =====
   const normLongFromDelta  = dp => dp==null ? 0 : clamp(-dp/2,-1,1);
   const normShortFromDelta = dp => dp==null ? 0 : clamp(dp/2,-1,1);
 
@@ -300,14 +281,6 @@ async function processSymbol(symbol){
 
   const MMS_long  = toScore100(MMS_long_raw);
   const MMS_short = toScore100(MMS_short_raw);
-
-  console.log("SNAPSHOT", symbol, JSON.stringify({
-    symbol,
-    last,
-    deltaVWAPpct: deltaVWAP != null ? +deltaVWAP.toFixed(4) : null,
-    deltaVWAPgPct: deltaVWAPg != null ? +deltaVWAPg.toFixed(4) : null,
-    deltaOIpct: deltaOI != null ? +deltaOI.toFixed(3) : null
-  }));
 
   return {
     symbol,
@@ -381,32 +354,6 @@ function getOiImpulse(deltaOIpct, volaPct){
   return { score, label };
 }
 
-// ========= OI IMPULSE WEIGHTED =========
-
-function getWeightedOiImpulse(rec, oiImpulse) {
-  const r = rec.rsi;
-  const r15 = r["15m"], r1h = r["1h"], r4h = r["4h"];
-  if (r15 == null || r1h == null || r4h == null) {
-    return { weighted: oiImpulse.score, mult: 1 };
-  }
-
-  // Calcul d’un TrendScore simple 0 → 1.6
-  let trend = 1;
-  const upBias = (r15 + r1h + r4h) / 3;
-  const downBias = 100 - upBias;
-
-  // Tendance haussière
-  if (upBias > 55) trend += 0.3;
-  if (upBias > 60) trend += 0.3;
-
-  // Tendance baissière
-  if (downBias > 55) trend += 0.25;
-  if (downBias > 60) trend += 0.25;
-
-  const weighted = oiImpulse.score * trend;
-  return { weighted, mult: trend };
-}
-
 // ========= RSI COHERENCE =========
 
 function isRSICoherent(rec, direction){
@@ -425,7 +372,7 @@ function isRSICoherent(rec, direction){
   }
 }
 
-// ========= CONFIANCE % (v0.8.2 moins punitive) =========
+// ========= CONFIANCE % =========
 
 function computeConfidence(rec, fusion, setupState, oiImpulse){
   let conf = 50;
@@ -435,7 +382,7 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
   const vola= rec.volaPct;
   const r   = rec.rsi;
 
-  // JDS contribution (plus généreux)
+  // JDS contribution
   if(jds >= 90) conf += 18;
   else if(jds >= 80) conf += 12;
   else if(jds >= 70) conf += 6;
@@ -467,12 +414,12 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
         else if(v < 40) scoreRSI -= 1;
       }
     }
-    conf += scoreRSI * 4; // -12..+12
+    conf += scoreRSI * 4; 
   }
 
   // RSI cohérence structurelle
   if(!isRSICoherent(rec, dir)){
-    conf -= 10; // pénalité mais moins violente
+    conf -= 10; 
   }
 
   // OI Impulse
@@ -480,7 +427,7 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
   else if(oiImpulse.label === "construction légère") conf += 6;
   else if(oiImpulse.label === "purge") conf -= 12;
 
-  // ΔVWAP Global (structure profonde du flux)
+  // ΔVWAP Global
   const dVG = rec.deltaVWAPgPct;
   if (dVG != null) {
     if (fusion.direction === "LONG" && dVG < -0.3)  conf += 6;
@@ -506,7 +453,7 @@ function computeConfidence(rec, fusion, setupState, oiImpulse){
   return clamp(Math.round(conf),0,100);
 }
 
-// ========= R:R et PLAN (entrée / SL / TP) =========
+// ========= R:R et PLAN =========
 
 function estimateRR(vola){
   if(vola==null) return 1.4;
@@ -514,7 +461,7 @@ function estimateRR(vola){
   if(vola < 8)   return 1.6;
   if(vola < 15)  return 1.4;
   if(vola < 25)  return 1.2;
-  return 1.1; // trop violent → RR faible
+  return 1.1; 
 }
 
 function buildTradePlan(rec, fusion, jds, rr){
@@ -522,7 +469,7 @@ function buildTradePlan(rec, fusion, jds, rr){
   const vola  = rec.volaPct ?? 5;
   const dir   = fusion.direction;
 
-  let riskPerc = clamp(vola / 3, 0.5, 5); // % distance SL
+  let riskPerc = clamp(vola / 3, 0.5, 5); 
   const rewardPerc = riskPerc * rr;
 
   let entry = price;
@@ -531,10 +478,10 @@ function buildTradePlan(rec, fusion, jds, rr){
   if(dir==="LONG"){
     sl  = price * (1 - riskPerc/100);
     if(jds >= 85){
-      tp1 = price * (1 + (0.9*riskPerc)/100);   // ≈ 0.9R
-      tp2 = price * (1 + (2.5*riskPerc)/100);   // ≈ 2.5R
+      tp1 = price * (1 + (0.9*riskPerc)/100);   
+      tp2 = price * (1 + (2.5*riskPerc)/100);   
     }else{
-      tp1 = price * (1 + (rewardPerc)/100);     // R:R simple
+      tp1 = price * (1 + (rewardPerc)/100);     
       tp2 = null;
     }
   }else{
@@ -564,25 +511,16 @@ function buildTradePlan(rec, fusion, jds, rr){
   };
 }
 
-// ========= RECOMMANDATION (v0.8.2) =========
+// ========= RECOMMANDATION =========
 
 function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent, rec){
 
-  // ΔOI soft-lock (v0.8.2-b)
   const dOI = rec.deltaOIpct;
-  if (direction === "SHORT" && dOI != null && dOI > MAX_OI_FOR_SHORT_OK) {
-    return "AVOID";
-  }
-  if (direction === "LONG" && dOI != null && dOI < MIN_OI_FOR_LONG_OK) {
-    return "AVOID";
-  }
+  if (direction === "SHORT" && dOI != null && dOI > MAX_OI_FOR_SHORT_OK) return "AVOID";
+  if (direction === "LONG" && dOI != null && dOI < MIN_OI_FOR_LONG_OK) return "AVOID";
 
-  // Verrou RSI incohérent : on ne prend pas le trade
-  if(!rsiCoherent){
-    return "AVOID";
-  }
+  if(!rsiCoherent) return "AVOID";
 
-  // Base sur setup state
   let reco;
   if(setupState==="DEAD") {
     reco = "AVOID";
@@ -592,34 +530,26 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
     reco = "WAIT ENTRY";
   } else if(setupState==="SETUP_READY"){
     reco = "TAKE — REDUCED";
-  } else { // PRIME
+  } else { 
     reco = "TAKE NOW";
   }
 
-  // R:R minimal assoupli
   if(rr < 1.05) reco = "AVOID";
 
-  // 🎯 Gate de confiance assouplie
-  // Avant : conf < 55 → AVOID (trop dur)
-  // Maintenant :
-  // - conf < 45  → AVOID
-  // - [45,55)    → OK mais jamais TAKE, max WAIT ENTRY
   if(conf < 45) {
     return "AVOID";
   }
   if(conf >= 45 && conf < 55) {
-    // On laisse les WAIT ENTRY vivre, mais on enlève les TAKE
     if (reco === "TAKE NOW" || reco === "TAKE — REDUCED") {
       reco = "WAIT ENTRY";
     }
   }
 
-  // Unlock TAKE NOW / TAKE — REDUCED (v0.8.2-b)
   if(reco==="TAKE NOW"){
     const ok =
       jds >= MIN_JDS_TRADE_NOW &&
-      conf >= 70 &&             // 75 → 70
-      rr >= 1.2 &&              // 1.3 → 1.2
+      conf >= 70 &&             
+      rr >= 1.2 &&              
       dVW!=null && Math.abs(dVW) <= 14 &&
       oiImpulse.label !== "purge";
     if(!ok){
@@ -631,30 +561,18 @@ function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direct
   if(reco==="TAKE — REDUCED"){
     const ok =
       jds >= MIN_JDS_WAIT_ENTRY &&
-      conf >= 60 &&             // 65 → 60
+      conf >= 60 &&             
       oiImpulse.label !== "purge";
     if(!ok) reco = "WAIT ENTRY";
   }
 
-  // HARD LOCK : purge forte contre la direction
-  if(direction==="LONG" && oiImpulse.label==="purge") {
-    reco = "AVOID";
-  }
-  if(direction==="SHORT" && oiImpulse.label==="construction forte") {
-    reco = "AVOID";
-  }
+  if(direction==="LONG" && oiImpulse.label==="purge") reco = "AVOID";
+  if(direction==="SHORT" && oiImpulse.label==="construction forte") reco = "AVOID";
 
-  // ΔVWAP Global (structure HTF) : légère gestion
   const dVG = rec.deltaVWAPgPct;
   if (dVG != null) {
-
-    // Contretendance très forte → on évite les TAKE NOW agressifs
-    if (direction === "LONG"  && dVG > 3.0 && (reco === "TAKE NOW" || reco === "TAKE — REDUCED")) {
-      reco = "WAIT ENTRY";
-    }
-    if (direction === "SHORT" && dVG < -3.0 && (reco === "TAKE NOW" || reco === "TAKE — REDUCED")) {
-      reco = "WAIT ENTRY";
-    }
+    if (direction === "LONG"  && dVG > 3.0 && (reco === "TAKE NOW" || reco === "TAKE — REDUCED")) reco = "WAIT ENTRY";
+    if (direction === "SHORT" && dVG < -3.0 && (reco === "TAKE NOW" || reco === "TAKE — REDUCED")) reco = "WAIT ENTRY";
   }
 
   return reco;
@@ -684,40 +602,32 @@ function shouldSendFor(symbol, direction, reco){
   const now = Date.now();
   const last = lastAlerts.get(key);
 
-  // jamais envoyé : on envoie
   if(!last){
     lastAlerts.set(key, { ts: now, reco });
     return true;
   }
-
-  // si reco a changé (ex: WAIT -> TAKE REDUCED), on envoie même si délai non écoulé
   if(last.reco !== reco){
     lastAlerts.set(key, { ts: now, reco });
     return true;
   }
-
-  // même reco, on applique le délai anti-spam
   if(now - last.ts < MIN_ALERT_DELAY_MS){
     return false;
   }
-
   lastAlerts.set(key, { ts: now, reco });
   return true;
 }
 
 // ========= TRADE VALIDATOR =========
 
-// Recalcule un "candidate" complet pour une paire unique
 async function buildCandidateForSymbol(symbol, initialDirection) {
   const rec = await processSymbol(symbol);
   if (!rec) return null;
 
   const fusion = fuseJDS(rec);
-  // 🔧 Correctif direction v0.8.2-b
-if (fusion.direction === "LONG") {
-  if (rec.deltaVWAPpct <= -1.2) fusion.direction = "SHORT";
-  if (rec.deltaVWAPgPct <= -2)  fusion.direction = "SHORT";
-}
+  if (fusion.direction === "LONG") {
+    if (rec.deltaVWAPpct <= -1.2) fusion.direction = "SHORT";
+    if (rec.deltaVWAPgPct <= -2)  fusion.direction = "SHORT";
+  }
   if (!fusion) return null;
 
   const direction = fusion.direction;
@@ -747,56 +657,35 @@ if (fusion.direction === "LONG") {
   };
 }
 
-// Vérifie si le trade initial est invalidé par la nouvelle structure
 function isTradeInvalidated(initial, latest) {
-  if (!latest) return true; // pas de data = on préfère annuler
+  if (!latest) return true; 
 
-  // 1) Si la reco n'est plus TAKE — REDUCED / TAKE NOW → on annule
-  if (latest.reco === "AVOID" || latest.reco === "WAIT ENTRY") {
-    return true;
-  }
+  if (latest.reco === "AVOID" || latest.reco === "WAIT ENTRY") return true;
 
-  // 2) Changement de direction = invalidation
-  if (latest.direction !== initial.direction) {
-    return true;
-  }
+  if (latest.direction !== initial.direction) return true;
 
   const oldRec = initial.rec;
   const newRec = latest.rec;
 
-  // 3) Changement de signe sur ΔVWAP ou amplitude trop extrême
   const oldDVW = oldRec.deltaVWAPpct;
   const newDVW = newRec.deltaVWAPpct;
   if (oldDVW != null && newDVW != null) {
-    if (oldDVW * newDVW < 0) {
-      return true;
-    }
-    if (Math.abs(newDVW) > 15) {
-      return true;
-    }
+    if (oldDVW * newDVW < 0) return true;
+    if (Math.abs(newDVW) > 15) return true;
   }
 
-  // 4) OI Impulse : purge forte vs direction
   const oiLabel = latest.oiImpulse.label;
   if (latest.direction === "LONG" && oiLabel === "purge") return true;
   if (latest.direction === "SHORT" && oiLabel === "construction forte") return true;
   
-  // 5) ΔVWAP Global (structure HTF) contradictoire
   const dVG = latest.rec.deltaVWAPgPct;
-
   if (dVG != null) {
-    if (latest.direction === "LONG" && dVG > 2.0) {
-      return true;
-    }
-    if (latest.direction === "SHORT" && dVG < -2.0) {
-      return true;
-    }
+    if (latest.direction === "LONG" && dVG > 2.0) return true;
+    if (latest.direction === "SHORT" && dVG < -2.0) return true;
   }
 
-  // 6) RSI incohérent maintenant
   if (!latest.rsiCoherent) return true;
 
-  // 7) Prix déjà trop loin : SL touché ou TP1 déjà fait avant entrée
   const priceNow = newRec.last;
   const entry    = initial.plan.entry;
   const sl       = initial.plan.sl;
@@ -813,39 +702,26 @@ function isTradeInvalidated(initial, latest) {
   return false;
 }
 
-// Programme une validation rapide du trade après VALIDATION_DELAY_MS
 function scheduleTradeValidation(initialTrade) {
   if (VALIDATION_DELAY_MS <= 0) return;
-
-  if (initialTrade.reco !== "TAKE — REDUCED" && initialTrade.reco !== "TAKE NOW") {
-    return;
-  }
+  if (initialTrade.reco !== "TAKE — REDUCED" && initialTrade.reco !== "TAKE NOW") return;
 
   setTimeout(async () => {
     try {
-      const latest = await buildCandidateForSymbol(
-        initialTrade.symbol,
-        initialTrade.direction
-      );
+      const latest = await buildCandidateForSymbol(initialTrade.symbol, initialTrade.direction);
       const invalid = isTradeInvalidated(initialTrade, latest);
 
       if (invalid) {
         const lines = [];
         lines.push("⚠️ *JTF Trade invalidé — Validation rapide*");
         lines.push(`Pair: \`${initialTrade.symbol}\``);
-        lines.push(`Direction: *${initialTrade.direction}*`);
-        lines.push(`Reco initiale: ${initialTrade.reco}`);
-        lines.push("");
-        lines.push("Structure cassée après validation (prix / ΔVWAP / ΔOI / RSI).");
-        lines.push("➡️ *Ne pas entrer sur ce setup.* Attends le prochain snapshot.");
-
+        lines.push("Structure cassée après validation.");
+        lines.push("➡️ *Ne pas entrer sur ce setup.*");
         await sendTelegram(lines.join("\n"));
-        console.log(`⚠️ Trade invalidé (validator) sur ${initialTrade.symbol} (${initialTrade.direction}).`);
-      } else {
-        console.log(`✅ Trade toujours valide après validation rapide: ${initialTrade.symbol} (${initialTrade.direction}).`);
+        console.log(`⚠️ Trade invalidé sur ${initialTrade.symbol}`);
       }
     } catch (e) {
-      console.error("Erreur dans scheduleTradeValidation:", e.message);
+      console.error("Erreur scheduleTradeValidation:", e.message);
     }
   }, VALIDATION_DELAY_MS);
 }
@@ -885,51 +761,32 @@ function formatRecoWithEmoji(reco){
 // ========= SCAN COMPLET =========
 
 async function scanOnce(){
-  console.log("🔍 Scan JTF v0.8.2…");
+  console.log("🔍 Scan JTF v0.8.2 (Autoselect)...");
 
   const snapshots = [];
-
-  // --- SCAN PAR PAQUETS (BATCHING) ---
-  const BATCH_SIZE = 5; // On scanne 5 paires en même temps pour aller vite
+  const BATCH_SIZE = 5; 
   
   for (let i = 0; i < SYMBOLS.length; i += BATCH_SIZE) {
     const batch = SYMBOLS.slice(i, i + BATCH_SIZE);
     
-    // Lancement en parallèle
     const results = await Promise.all(
       batch.map(symbol => processSymbol(symbol).catch(e => {
         console.error(`⚠️ Erreur sur ${symbol}:`, e.message);
         return null;
       }))
     );
-
-    // Récupération des résultats valides
     for (const res of results) {
       if (res) snapshots.push(res);
     }
-
-    // Petite pause de sécurité pour l'API (1 seconde entre chaque paquet)
     if (i + BATCH_SIZE < SYMBOLS.length) {
       await sleep(1000); 
     }
   }
-  // -----------------------------------
 
-  // Noisy Market Blocker : on utilise BTC comme proxy du marché global
+  // Blocker marché bruyant
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
   if(btcRec && isNoisyMarket(btcRec)){
-    await sendTelegram(
-`🔴 *JTF AUTOSELECT v0.8.2 — Marché sans direction*
-
-BTCUSDT est en zone plate :
-• Vola ≈ ${btcRec.volaPct != null ? btcRec.volaPct.toFixed(2) : "n/a"}%
-• ΔVWAP ≈ ${btcRec.deltaVWAPpct != null ? btcRec.deltaVWAPpct.toFixed(2) : "n/a"}%
-• Tend ≈ ${btcRec.tend24 != null ? btcRec.tend24.toFixed(2) : "n/a"}%
-• ΔOI ≈ ${btcRec.deltaOIpct != null ? btcRec.deltaOIpct.toFixed(2) : "n/a"}%
-
-→ Aucun setup judicieux sur ce snapshot (marché bruyant / sans flux directionnel).`
-    );
-    console.log("ℹ️ Marché sans direction (noisy blocker).");
+    console.log("ℹ️ Marché sans direction (noisy blocker) - Silence radio.");
     return;
   }
 
@@ -949,6 +806,13 @@ BTCUSDT est en zone plate :
       jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction, rsiCoherent, rec
     );
 
+    // --- FILTRE D'AFFICHAGE LOGS ---
+    // On n'affiche rien pour AVOID ou WAIT ENTRY.
+    // On affiche seulement si c'est un "TAKE" (opportunité réelle).
+    if (reco.includes("TAKE")) {
+      console.log(`✅ SETUP TROUVÉ : ${rec.symbol} (${fusion.direction}) -> ${reco}`);
+    }
+
     candidates.push({
       symbol: rec.symbol,
       direction: fusion.direction,
@@ -962,19 +826,12 @@ BTCUSDT est en zone plate :
       reco,
       rsiCoherent
     });
-        // --- FILTRE D'AFFICHAGE ---
-    // On n'affiche rien pour AVOID ou WAIT ENTRY.
-    // On affiche seulement si c'est un "TAKE" (opportunité réelle).
-    if (reco.includes("TAKE")) {
-      console.log(`✅ SETUP TROUVÉ : ${rec.symbol} (${fusion.direction}) -> ${reco}`);
-    }
-
   }
-  
 
-  // Filtre : on ne garde pas AVOID
+  // --- FILTRE STRICT TELEGRAM ---
+  // On ne garde QUE les signaux d'attaque ("TAKE NOW" ou "TAKE — REDUCED")
   const tradables = candidates
-    .filter(c => c.reco !== "AVOID")
+    .filter(c => c.reco.includes("TAKE")) 
     .sort((a,b)=>{
       const order = {
         "SETUP_PRIME":4,
@@ -990,32 +847,25 @@ BTCUSDT est en zone plate :
       if(b.jds !== a.jds) return b.jds - a.jds;
       return b.confiance - a.confiance;
     })
-    .slice(0,3); // max 3 trades
+    .slice(0,3);
 
+  // SI RIEN A TRADER : On ne dit RIEN (Silence absolu)
   if(!tradables.length){
-    await sendTelegram(
-`🔴 *JTF AUTOSELECT v0.8.2 — Aucun trade judicieux*
-
-Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance insuffisante, un R:R trop faible ou une structure incohérente (RSI / ΔVWAP / ΔOI).
-→ Résultat : *aucun trade recommandé* sur ce snapshot.`
-    );
-    console.log("ℹ️ Aucun trade judicieux.");
+    console.log("ℹ️ Aucun trade 'TAKE' sur ce snapshot. Silence.");
     return;
   }
 
-  // Vérif anti-spam : au moins un setup nouveau ou dont la reco change
+  // Vérif anti-spam
   const fresh = tradables.filter(c => shouldSendFor(c.symbol, c.direction, c.reco));
   if(!fresh.length){
-    console.log("⏱️ Pas de nouveaux setups (anti-spam / reco inchangée), on skip l'envoi.");
+    console.log("⏱️ Pas de nouveaux setups (anti-spam), silence.");
     return;
   }
 
-  // Les trades à valider rapidement (TAKE — REDUCED / TAKE NOW) parmi les setups frais
   const toValidate = fresh.filter(c =>
     c.reco === "TAKE — REDUCED" || c.reco === "TAKE NOW"
   );
 
-  // ===== Format Telegram PRO avec emojis =====
   const lines = [];
   lines.push("📊 *JTF v0.8.2 AUTOSELECT — Snapshot TOP30*");
 
@@ -1023,9 +873,7 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
     const vola   = c.rec.volaPct ?? 5;
     const type   = vola > 12 ? "Scalp" : "Swing";
     const levier = vola <= 5 ? "4x" : (vola <= 15 ? "3x" : "2x");
-    const tpStr  = (c.jds >= 85 && c.plan.tp2)
-      ? `${c.plan.tp1} / ${c.plan.tp2}`
-      : `${c.plan.tp1}`;
+    const tpStr  = (c.jds >= 85 && c.plan.tp2) ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
     const rrStr  = (+c.plan.rr).toFixed(1);
     const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
 
@@ -1050,15 +898,6 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
     lines.push(formatRecoWithEmoji(c.reco));
   });
 
-  const best = tradables[0];
-
-  lines.push("");
-  lines.push("*Résumé :*");
-  lines.push(`• ${tradables.length} setup(s) ont passé tous les filtres (Setup State, Confiance, OI Impulse, RSI, R:R).`);
-  lines.push(`• Meilleur score : *${best.symbol}* (${best.direction}) avec JDS = ${best.jds.toFixed(1)} et Confiance = ${best.confiance}%.`);
-  lines.push("• Aucun trade en dehors de cette liste : pas de FOMO, pas plus de 3 positions issues de ce snapshot.");
-  lines.push("• Si la structure change fortement avant l'entrée (ΔVWAP, RSI, ΔOI), considère le plan comme *invalidé* et attends le prochain snapshot.");
-
   const message = lines.join("\n");
   await sendTelegram(message);
   
@@ -1066,14 +905,14 @@ Tous les setups du TOP30 sont soit en état DEAD/CHOP, soit avec une Confiance i
     scheduleTradeValidation(t);
   }
   
-  console.log("✅ Snapshot JTF v0.8.2 envoyé.");
+  console.log("✅ Snapshot JTF v0.8.2 envoyé (TAKE only).");
 }
 
 // ========= MAIN LOOP =========
 
 async function main(){
   console.log("🚀 JTF v0.8.2 AUTOSELECT — Bot Railway démarré.");
-  await sendTelegram("🟢 JTF v0.8.2 AUTOSELECT démarré sur Railway (snapshot TOP30 toutes les 5 minutes).");
+  await sendTelegram("🟢 JTF v0.8.2 AUTOSELECT démarré (Mode Silencieux: TAKE Only).");
 
   while(true){
     try{
@@ -1086,4 +925,3 @@ async function main(){
 }
 
 export const startAutoselect = main;
-
