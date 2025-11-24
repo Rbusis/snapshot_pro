@@ -962,18 +962,13 @@ BTCUSDT est en zone plate :
       reco,
       rsiCoherent
     });
-    console.log(
-  "CAND",
-  rec.symbol,
-  "dir=", fusion.direction,
-  "jds=", jds,
-  "state=", setupState,
-  "conf=", confiance,
-  "reco=", reco,
-  "dVW=", rec.deltaVWAPpct,
-  "dVG=", rec.deltaVWAPgPct,
-  "dOI=", rec.deltaOIpct
-);
+        // --- FILTRE D'AFFICHAGE ---
+    // On n'affiche rien pour AVOID ou WAIT ENTRY.
+    // On affiche seulement si c'est un "TAKE" (opportunité réelle).
+    if (reco.includes("TAKE")) {
+      console.log(`✅ SETUP TROUVÉ : ${rec.symbol} (${fusion.direction}) -> ${reco}`);
+    }
+
   }
   
 
