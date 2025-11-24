@@ -1,5 +1,5 @@
-// degen.js — JTF DEGEN v0.9 (Robust Fix)
-// Intègre le "Retry Pattern" pour ne pas planter si le BTC est illisible une seconde.
+// degen.js — JTF DEGEN v0.10 (Calm Mode)
+// Mises à jour : Single-Shot + Global Cooldown (15m) + Retry Pattern
 
 import fetch from "node-fetch";
 
@@ -7,12 +7,14 @@ import fetch from "node-fetch";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS   = 5 * 60_000;
-const MIN_ALERT_DELAY_MS = 15 * 60_000; 
-const BTC_DUMP_THRESHOLD = -0.3;
+const MIN_ALERT_DELAY_MS = 15 * 60_000;     // Anti-spam par paire
+const GLOBAL_COOLDOWN_MS = 15 * 60_000;     // 🔥 NOUVEAU : 15 min de pause après un trade global (Degen est plus rapide)
+const BTC_DUMP_THRESHOLD = -0.3;            // On garde -0.3 pour Degen (plus tolérant que Discovery)
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
 let DEGEN_SYMBOLS = [];
 let lastSymbolUpdate = 0;
+let lastGlobalTradeTime = 0; // 🔥 NOUVEAU : Timestamp du dernier signal envoyé
 const lastAlerts = new Map();
 
 const FALLBACK_LOWCAPS = ["MAGICUSDT_UMCBL","GALAUSDT_UMCBL","ONEUSDT_UMCBL","CELOUSDT_UMCBL","KAVAUSDT_UMCBL"];
@@ -45,15 +47,13 @@ async function getCandles(symbol, seconds, limit=100){
   return [];
 }
 
-// 🔥 NOUVELLE FONCTION ROBUSTE (RETRY PATTERN) 🔥
+// 🔥 FONCTION ROBUSTE (RETRY PATTERN) 🔥
 async function getBTCTrend() {
-  const MAX_RETRIES = 3; // On insiste 3 fois
-  
+  const MAX_RETRIES = 3; 
   for(let i = 0; i < MAX_RETRIES; i++) {
     const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
     
     if (candles && candles.length >= 2) {
-      // Succès !
       const current = candles[candles.length - 1];
       const open = current.o;
       const close = current.c;
@@ -61,14 +61,11 @@ async function getBTCTrend() {
       return ((close - open) / open) * 100;
     }
     
-    // Si échec, on attend avant de réessayer
     if (i < MAX_RETRIES - 1) {
       console.log(`⚠️ DEGEN: Echec lecture BTC (Tentative ${i+1}/${MAX_RETRIES})... Retry dans 2s.`);
       await sleep(2000); 
     }
   }
-
-  // Echec total après 3 essais
   return null;
 }
 
@@ -177,7 +174,6 @@ function checkAntiSpam(symbol, direction){
 
 async function scanDegen(){
   const now = Date.now();
-  // Appel sécurisé qui réessaiera 3 fois si besoin
   const btcChange = await getBTCTrend();
   
   if (btcChange == null || isNaN(btcChange)) {
@@ -188,7 +184,9 @@ async function scanDegen(){
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DEGEN_SYMBOLS.length === 0){
     DEGEN_SYMBOLS = await updateDegenList(); lastSymbolUpdate = now;
   }
-  console.log(`🎰 DEGEN v0.9 | BTC: ${btcChange.toFixed(2)}% | Scan ${DEGEN_SYMBOLS.length} paires`);
+  
+  // Log de suivi Calm Mode
+  console.log(`🎰 DEGEN v0.10 | BTC: ${btcChange.toFixed(2)}% | Last Global Trade: ${Math.floor((now - lastGlobalTradeTime)/60000)}m ago`);
   
   const BATCH_SIZE = 5; const candidates = [];
   for(let i=0; i<DEGEN_SYMBOLS.length; i+=BATCH_SIZE){
@@ -198,25 +196,38 @@ async function scanDegen(){
     await sleep(400); 
   }
   
-  const best = candidates.sort((a,b) => b.score - a.score).slice(0, 2);
+  // 🔥 SINGLE-SHOT : Max 1 trade (le meilleur)
+  const best = candidates.sort((a,b) => b.score - a.score).slice(0, 1);
+  
   for(const c of best){
+    // 🔥 GLOBAL COOLDOWN CHECK (15 mins)
+    const timeSinceLast = now - lastGlobalTradeTime;
+    if (timeSinceLast < GLOBAL_COOLDOWN_MS) {
+      console.log(`⏳ DEGEN Signal ${c.symbol} IGNORÉ : Cooldown Global actif (${Math.floor(timeSinceLast/60000)}/${GLOBAL_COOLDOWN_MS/60000} min).`);
+      continue;
+    }
+
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
+    
     const emoji = c.direction === "LONG" ? "💎" : "💣";
-    let footer = "_Zone DEGEN (Risque Élevé)_";
+    let footer = "_Zone DEGEN (Calmed)_";
     if (c.volRatio >= 4.0) footer = "🔥 MEGA PUMP (x4) : ALERTE MAXIMALE !";
     
     const levierConseille = c.riskPct > 5 ? "2x" : "3x";
 
-    const msg = `🎰 *JTF DEGEN v0.9 (Robust Fix)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    const msg = `🎰 *JTF DEGEN v0.10 (Calm Mode)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
+    
+    // 🔥 ACTIVE LE COOLDOWN
+    lastGlobalTradeTime = now;
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.9 (Robust Fix) démarré.");
-  await sendTelegram("🎰 *JTF DEGEN v0.9 (Moteur BTC Robuste) activé.*");
+  console.log("🔥 JTF DEGEN v0.10 (Calm Mode) démarré.");
+  await sendTelegram("🎰 *JTF DEGEN v0.10 (Calm Mode) activé.*");
   while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Crash:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
