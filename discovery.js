@@ -3,7 +3,8 @@
 // LOGIQUE : Midcap Scoring (Vol > 1.8, No Wicks, Clean VWAP Gap)
 
 import fetch from "node-fetch";
-import fs from "fs";
+import { loadJson } from "./config/loadJson.js";
+const top30 = loadJson("./config/top30.json");
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
