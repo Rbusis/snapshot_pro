@@ -1,6 +1,5 @@
-// degen.js — JTF DEGEN v0.5 (Smart Entry + Levier)
-// Cible : Low-Caps (Rangs #51 à #150).
-// Avec calcul prix Limit et Levier conseillé.
+// degen.js — JTF DEGEN v0.6 (Debugged)
+// Correction SyntaxError + Sécurité BTC Paranoïaque.
 
 import fetch from "node-fetch";
 
@@ -31,7 +30,10 @@ async function getBTCTrend() {
     const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=BTCUSDT_UMCBL&granularity=3600&limit=5`);
     if(!j?.data || j.data.length < 2) return null;
     const current = j.data[j.data.length - 1];
-    return ((+current[4] - +current[1]) / +current[1]) * 100;
+    const open = +current[1];
+    const close = +current[4];
+    if(!open) return 0;
+    return ((close - open) / open) * 100;
   } catch { return null; }
 }
 
@@ -88,7 +90,10 @@ function analyzeCandidate(rec, btcChange) {
   let direction=null, score=0, reason="";
 
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    if (btcChange != null && btcChange < BTC_DUMP_THRESHOLD) return null; 
+    // SÉCURITÉ BTC
+    if (btcChange == null) return null;
+    if (btcChange < BTC_DUMP_THRESHOLD) return null;
+
     if (rec.obScore >= 0) {
       let s=50;
       if(rec.volRatio>3.0) s+=20; else if(rec.volRatio>2.0) s+=10;
@@ -106,14 +111,8 @@ function analyzeCandidate(rec, btcChange) {
 
   if (!direction) return null;
 
-  // --- SMART ENTRY ---
   const pullbackPct = clamp(rec.volaPct / 20, 0.4, 1.2); 
-  let limitEntry;
-  if (direction === "LONG") {
-    limitEntry = rec.last * (1 - pullbackPct/100);
-  } else {
-    limitEntry = rec.last * (1 + pullbackPct/100);
-  }
+  let limitEntry = direction === "LONG" ? rec.last * (1 - pullbackPct/100) : rec.last * (1 + pullbackPct/100);
 
   const riskMult = 2.0; 
   const riskPct = clamp((rec.volaPct/5)*riskMult, 2.0, 10.0);
@@ -144,10 +143,15 @@ async function scanDegen(){
   const now = Date.now();
   const btcChange = await getBTCTrend();
   
+  if (btcChange == null) {
+    console.log("⚠️ BTC Indisponible -> Scan Degen annulé.");
+    return;
+  }
+
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DEGEN_SYMBOLS.length === 0){
     DEGEN_SYMBOLS = await updateDegenList(); lastSymbolUpdate = now;
   }
-  console.log(`🎰 DEGEN Scan | BTC: ${btcChange?.toFixed(2)}%`);
+  console.log(`🎰 DEGEN Scan | BTC: ${btcChange.toFixed(2)}%`);
   
   const BATCH_SIZE = 5; const candidates = [];
   for(let i=0; i<DEGEN_SYMBOLS.length; i+=BATCH_SIZE){
@@ -163,11 +167,9 @@ async function scanDegen(){
     const emoji = c.direction === "LONG" ? "💎" : "💣";
     let footer = "_Zone DEGEN (Risque Élevé)_";
     if (c.volRatio >= 4.0) footer = "🔥 MEGA PUMP (x4) : ALERTE MAXIMALE !";
-
-    // Calcul du levier conseillé (Degen = souvent volatil donc levier faible)
     const levierConseille = c.riskPct > 5 ? "2x" : "3x";
 
-    const msg = `🎰 *JTF DEGEN v0.5 (Smart Entry)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    const msg = `🎰 *JTF DEGEN v0.6 (Debug)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
@@ -175,9 +177,9 @@ async function scanDegen(){
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.5 démarré.");
-  await sendTelegram("🎰 *JTF DEGEN v0.5 (Smart Entry) activé.*");
-  while(true){ try { await scanDegen(); } catch(e) {} await sleep(SCAN_INTERVAL_MS); }
+  console.log("🔥 JTF DEGEN v0.6 (Debug) démarré.");
+  await sendTelegram("🎰 *JTF DEGEN v0.6 (Sécurité BTC Debug) activé.*");
+  while(true){ try { await scanDegen(); } catch(e) { console.error("Degen error:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
 export const startDegen = main;
