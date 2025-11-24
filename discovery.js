@@ -143,8 +143,9 @@ function analyzeCandidate(rec) {
   if (rec.priceVsVwap > 0.5 && rec.rsi1h > 55 && rec.rsi15 > 50) {
     let s = 50;
     if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
-    if (rec.rsi15 > 60 && rec.rsi15 < 80) s += 10;
-    if (rec.change24 > 5) s += 10;
+    // On ajoute "rec.volRatio < 1.0" pour filtrer tout ce qui n'a pas de volume
+if(!rec || !rec.rsi15 || !rec.rsi1h || rec.volaPct < 3 || rec.volRatio < 1.0) return null;
+if (rec.change24 > 5) s += 10;
     if (s >= 70) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI Bull`; }
   }
   // SHORT
