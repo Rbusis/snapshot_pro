@@ -378,10 +378,12 @@ async function scanOnce(){
     const plan=buildTradePlan(rec, fusion, jds, rr);
     const reco=computeRecommendation(jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction, rsiCoherent, rec);
 
-    if (reco.includes("TAKE")) console.log(`✅ SETUP TROUVÉ : ${rec.symbol} (${fusion.direction}) -> ${reco}`);
-
+        // --- MODE DEBUG : AFFICHER TOUS LES SCORES ---
+    console.log(`🔎 ${rec.symbol} | Dir: ${fusion.direction} | Score JDS: ${jds.toFixed(1)} | Reco: ${reco}`);
+    
     candidates.push({ symbol: rec.symbol, direction: fusion.direction, jds, setupState, confiance, oiImpulse, rr: +plan.rr, plan, rec, reco, rsiCoherent });
   }
+
 
   // --- FILTRE STRICT TELEGRAM : ON GARDE UNIQUEMENT LES "TAKE" ---
   // C'est ici que la magie opère : les WAIT ENTRY sont éliminés.
