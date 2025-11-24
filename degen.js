@@ -3,8 +3,8 @@
 // LOGIQUE : Momentum Sniper (VolRatio > 2.5, Wicks Filters, VWAP Gaps)
 
 import fetch from "node-fetch";
-import fs from "fs";
-import top30 from "./config/top30.json" assert { type: "json" };
+import { loadJson } from "./config/loadJson.js";
+const top30 = loadJson("./config/top30.json");
 
 function getDiscoveryList() {
   try {
