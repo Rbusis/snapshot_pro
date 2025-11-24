@@ -380,8 +380,8 @@ async function scanOnce(){
     const plan=buildTradePlan(rec, fusion, jds, rr);
     const reco=computeRecommendation(jds, confiance, rr, oiImpulse, rec.deltaVWAPpct, setupState, fusion.direction, rsiCoherent, rec);
 
-        // --- MODE DEBUG : AFFICHER TOUS LES SCORES ---
-    console.log(`🔎 ${rec.symbol} | Dir: ${fusion.direction} | Score JDS: ${jds.toFixed(1)} | Reco: ${reco}`);
+        // --- MODE SILENCIEUX : aucune ligne de debug ---
+// (désactive l'affichage des analyses internes autoselect)
     
     candidates.push({ symbol: rec.symbol, direction: fusion.direction, jds, setupState, confiance, oiImpulse, rr: +plan.rr, plan, rec, reco, rsiCoherent });
   }
