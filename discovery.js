@@ -1,5 +1,5 @@
-// discovery.js — JTF DISCOVERY v0.8 (Debugged)
-// Correction SyntaxError + Sécurité BTC Paranoïaque (Si pas de BTC, pas de trade).
+// discovery.js — JTF DISCOVERY v0.9 (Fail-Safe Fix)
+// CORRECTIF CRITIQUE : Si BTC est illisible, le scan s'arrête (Pas de trade à l'aveugle).
 
 import fetch from "node-fetch";
 
@@ -29,9 +29,11 @@ async function safeGetJson(url){
 
 async function getBTCTrend() {
   try {
+    // On utilise v2 pour plus de fiabilité si possible, sinon v1
     const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=BTCUSDT_UMCBL&granularity=3600&limit=5`);
     if(!j?.data || j.data.length < 2) return null;
-    const current = j.data[j.data.length - 1]; // Bougie actuelle
+    // data: [timestamp, open, high, low, close, vol]
+    const current = j.data[j.data.length - 1]; 
     const open = +current[1];
     const close = +current[4];
     if(!open) return 0;
@@ -92,9 +94,9 @@ function analyzeCandidate(rec, btcChange) {
   let direction=null, score=0, reason="";
 
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    // SÉCURITÉ BTC RENFORCÉE
-    if (btcChange == null) return null; // Si BTC inconnu, on ne prend pas de risque
-    if (btcChange < BTC_DUMP_THRESHOLD) return null; // Si BTC chute, on annule
+    // SÉCURITÉ RENFORCÉE : Si BTC inconnu ou baissier, ON BLOQUE
+    if (btcChange == null || isNaN(btcChange)) return null; 
+    if (btcChange < BTC_DUMP_THRESHOLD) return null; 
 
     if (rec.obScore >= 0) {
       let s=50;
@@ -146,9 +148,10 @@ async function scanDiscovery(){
   const now = Date.now();
   const btcChange = await getBTCTrend();
   
-  if (btcChange == null) {
-    console.log("⚠️ BTC Indisponible (API error) -> Sécurité : Scan Discovery annulé.");
-    return; // ON ARRÊTE TOUT SI PAS DE BTC
+  // BLOQUEUR GÉNÉRAL : Si pas de BTC, on arrête tout le scan
+  if (btcChange == null || isNaN(btcChange)) {
+    console.error("🚨 ERREUR CRITIQUE : Impossible de lire le BTC. Scan Discovery ANNULÉ par sécurité.");
+    return; 
   }
 
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DISCOVERY_SYMBOLS.length === 0){
@@ -170,9 +173,10 @@ async function scanDiscovery(){
     const emoji = c.direction === "LONG" ? "🚀" : "🪂";
     let footer = "_Mode Elite (80+) | Smart Entry_";
     if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Setup Majeur";
+    
     const levierConseille = c.riskPct > 4 ? "2x" : (c.riskPct > 2.5 ? "3x" : "4x");
 
-    const msg = `⚡ *JTF DISCOVERY v0.8 (Debug)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    const msg = `⚡ *JTF DISCOVERY v0.9 (Safe)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal Discovery envoyé: ${c.symbol}`);
@@ -180,9 +184,9 @@ async function scanDiscovery(){
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.8 (Debug) démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY v0.8 (Sécurité BTC Debug) activé.*");
-  while(true){ try { await scanDiscovery(); } catch(e) { console.error("Discovery error:", e); } await sleep(SCAN_INTERVAL_MS); }
+  console.log("🔥 JTF DISCOVERY v0.9 (Safe) démarré.");
+  await sendTelegram("🔥 *JTF DISCOVERY v0.9 (Sécurité BTC Active) activé.*");
+  while(true){ try { await scanDiscovery(); } catch(e) { console.error("Discovery Error:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
 export const startDiscovery = main;
