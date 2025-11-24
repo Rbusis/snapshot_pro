@@ -887,8 +887,32 @@ function formatRecoWithEmoji(reco){
 async function scanOnce(){
   console.log("🔍 Scan JTF v0.8.2…");
 
-  const snapshots = [];
-    // DANS LA FONCTION scanOnce()
+    // --- SCAN PAR PAQUETS (BATCHING) ---
+  const BATCH_SIZE = 5; // On scanne 5 paires en même temps pour aller vite
+  
+  for (let i = 0; i < SYMBOLS.length; i += BATCH_SIZE) {
+    const batch = SYMBOLS.slice(i, i + BATCH_SIZE);
+    
+    // Lancement en parallèle
+    const results = await Promise.all(
+      batch.map(symbol => processSymbol(symbol).catch(e => {
+        console.error(`⚠️ Erreur sur ${symbol}:`, e.message);
+        return null;
+      }))
+    );
+
+    // Récupération des résultats valides
+    for (const res of results) {
+      if (res) snapshots.push(res);
+    }
+
+    // Petite pause de sécurité pour l'API (1 seconde entre chaque paquet)
+    if (i + BATCH_SIZE < SYMBOLS.length) {
+      await sleep(1000); 
+    }
+  }
+  // -----------------------------------
+
 
   // Remplacer l'ancienne boucle "for" par ceci :
   
