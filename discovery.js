@@ -1,6 +1,7 @@
-// discovery.js — JTF DISCOVERY v0.4 (Volume + Order Book Pressure)
-// Stratégie : Momentum 5m + Validation par le Carnet d'Ordres (Bid/Ask Ratio).
-// Objectif : Éviter d'acheter des "fake pumps" sans pression acheteuse réelle.
+// discovery.js — JTF DISCOVERY v0.5 (Elite Mode)
+// Cible : Mid-Caps (Top 50 hors autoselect).
+// Stratégie : Momentum 5m + Order Book.
+// FILTRES STRICTS : Score >= 80 | Volume >= x1.5
 
 import fetch from "node-fetch";
 
@@ -9,8 +10,8 @@ import fetch from "node-fetch";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS   = 5 * 60_000;
-const MIN_ALERT_DELAY_MS = 15 * 60_000;
+const SCAN_INTERVAL_MS   = 5 * 60_000;   // Scan toutes les 5 min
+const MIN_ALERT_DELAY_MS = 15 * 60_000;  // Anti-spam 15 min
 
 let DISCOVERY_SYMBOLS = [];
 let lastSymbolUpdate = 0;
@@ -22,6 +23,7 @@ const FALLBACK_MIDCAPS = [
   "STXUSDT_UMCBL","IMXUSDT_UMCBL","SNXUSDT_UMCBL","FXSUSDT_UMCBL"
 ];
 
+// Liste des cryptos gérées par le Bot 1 (Autoselect) pour éviter les doublons
 const IGNORE_LIST = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -65,7 +67,7 @@ async function updateDiscoveryList() {
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
     const midCaps = valid.slice(0, 50).map(t => t.symbol);
 
-    console.log(`🔄 Discovery v0.4 List : ${midCaps.length} paires (Top: ${midCaps[0]})`);
+    console.log(`🔄 Discovery List (Elite): ${midCaps.length} paires.`);
     return midCaps.length > 5 ? midCaps : FALLBACK_MIDCAPS;
 
   } catch (e) {
@@ -74,7 +76,7 @@ async function updateDiscoveryList() {
   }
 }
 
-// ========= API DATA COMPLETE (Ticker + Candles + Depth) =========
+// ========= API DATA =========
 
 async function getTicker(symbol){
   const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`);
@@ -92,7 +94,6 @@ async function getFunding(symbol){
   const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/currentFundRate?symbol=${symbol}`);
   return j?.data ?? null;
 }
-// NOUVEAU : Récupération du carnet d'ordres
 async function getDepth(symbol){
   const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/depth?symbol=${symbol}&limit=20`);
   if(j?.data?.bids && j?.data?.asks) return j.data;
@@ -121,7 +122,6 @@ function vwap(c){
 // ========= ANALYSE TECHNIQUE =========
 
 async function processDiscovery(symbol) {
-  // On ajoute getDepth dans les appels
   const [tk, fr, depth] = await Promise.all([
     getTicker(symbol), 
     getFunding(symbol),
@@ -149,54 +149,44 @@ async function processDiscovery(symbol) {
   const volaPct = (high24 - low24) / last * 100;
   const change24 = (+tk.priceChangePercent) * 100;
 
-  // ANALYSE DU CARNET D'ORDRES (Order Book Imbalance)
-  let obScore = 0; // -1 (Vendeurs) à +1 (Acheteurs)
-  let bidsVol = 0;
-  let asksVol = 0;
+  let obScore = 0; let bidsVol = 0; let asksVol = 0;
 
   if (depth && depth.bids && depth.asks) {
-    // Somme des volumes sur les 10 premières lignes
     bidsVol = depth.bids.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
     asksVol = depth.asks.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
-    
-    // Ratio > 1 = Pression Achat, Ratio < 1 = Pression Vente
     if (asksVol > 0) {
       const ratio = bidsVol / asksVol;
-      if (ratio > 1.2) obScore = 1;      // Fort Achat
-      else if (ratio < 0.8) obScore = -1; // Fort Vente
-      else obScore = 0; // Neutre
+      if (ratio > 1.2) obScore = 1; else if (ratio < 0.8) obScore = -1;
     }
   }
 
   return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0, obScore, bidsVol, asksVol };
 }
 
-// ========= LOGIQUE SIGNAL (Momentum + OrderBook) =========
+// ========= LOGIQUE SIGNAL (ELITE) =========
 
 function analyzeCandidate(rec) {
-  // Filtres de base (Volume, RSI, Vola)
-  if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 1.0) return null;
+  // FILTRE 1 : Volume x1.5 MINIMUM
+  if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 1.5) return null;
   
-  // Filtres Anti-FOMO
+  // Anti-FOMO
   if (rec.rsi5 > 82) return null; 
   if (rec.rsi5 < 18) return null;
   if (Math.abs(rec.priceVsVwap) > 4.0) return null;
 
   let direction = null, score = 0, reason = "";
 
-  // --- LOGIQUE LONG ---
-  // On exige maintenant que le Carnet d'Ordres ne soit PAS rouge (obScore >= 0)
+  // LONG
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    if (rec.obScore >= 0) { // Pas de mur de vente devant nous
+    if (rec.obScore >= 0) {
         let s = 50;
         if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
         if (rec.rsi5 > 60) s += 10;
         if (rec.change24 > 3) s += 10; 
-        
-        // Bonus si Carnet d'Ordres très acheteur
         if (rec.obScore === 1) s += 10;
 
-        if (s >= 70) { 
+        // FILTRE 2 : SCORE >= 80 (Exigeant)
+        if (s >= 80) { 
             direction = "LONG"; 
             score = s; 
             reason = `Vol x${rec.volRatio.toFixed(1)} | OrderBook Bullish`; 
@@ -204,18 +194,17 @@ function analyzeCandidate(rec) {
     }
   }
   
-  // --- LOGIQUE SHORT ---
+  // SHORT
   else if (rec.priceVsVwap < -0.3 && rec.rsi15 < 50 && rec.rsi5 < 45 && rec.rsi5 > 20) {
-    if (rec.obScore <= 0) { // Pas de mur d'achat qui retient le prix
+    if (rec.obScore <= 0) {
         let s = 50;
         if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
         if (rec.rsi5 < 40) s += 10;
         if (rec.change24 < -3) s += 10;
-
-        // Bonus si Carnet d'Ordres très vendeur
         if (rec.obScore === -1) s += 10;
         
-        if (s >= 70) { 
+        // FILTRE 2 : SCORE >= 80 (Exigeant)
+        if (s >= 80) { 
             direction = "SHORT"; 
             score = s; 
             reason = `Vol x${rec.volRatio.toFixed(1)} | OrderBook Bearish`; 
@@ -232,8 +221,6 @@ function analyzeCandidate(rec) {
   
   const sl = direction === "LONG" ? rec.last * (1 - riskPct/100) : rec.last * (1 + riskPct/100);
   const tp = direction === "LONG" ? rec.last * (1 + (riskPct * 2.5)/100) : rec.last * (1 - (riskPct * 2.5)/100);
-
-  // Ratio Order Book pour affichage
   const obRatio = rec.asksVol > 0 ? (rec.bidsVol / rec.asksVol).toFixed(2) : "N/A";
 
   return { 
@@ -264,7 +251,7 @@ async function scanDiscovery(){
     DISCOVERY_SYMBOLS = await updateDiscoveryList(); lastSymbolUpdate = now;
   }
   
-  console.log(`🚀 Discovery v0.4 Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
+  console.log(`🚀 Discovery Elite Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
   
   const BATCH_SIZE = 5; 
   const candidates = [];
@@ -287,21 +274,19 @@ async function scanDiscovery(){
     
     const emoji = c.direction === "LONG" ? "🚀" : "🪂";
     
-    let footer = "_Mode Rapide (5m)_";
-    if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Entrée immédiate !";
-    else if (c.volRatio >= 1.5) footer = "⚡ Dynamique forte : Soyez rapide";
-    else footer = "⚠️ Volume modéré : Prudence (Petite mise)";
+    let footer = "_Mode Elite (80+) : Forte Probabilité_";
+    if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Setup Majeur !";
 
-    const msg = `⚡ *JTF DISCOVERY v0.4 (Vol + OrderBook)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *Order Book Ratio:* ${c.obRatio}\n_(>1.2 = Acheteurs dominent)_\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    const msg = `⚡ *JTF DISCOVERY (Elite)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
     
     await sendTelegram(msg); 
-    console.log(`✅ Signal v0.4 envoyé: ${c.symbol}`);
+    console.log(`✅ Signal Elite envoyé: ${c.symbol}`);
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.4 (OB) démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY v0.4 (avec Carnet d'Ordres) activé.*");
+  console.log("🔥 JTF DISCOVERY v0.5 (Elite) démarré.");
+  await sendTelegram("🔥 *JTF DISCOVERY (Mode Élite 80+) activé.*");
   while(true){ 
     try { await scanDiscovery(); } 
     catch(e) { console.error("Discovery Loop Error:", e.message); } 
