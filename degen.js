@@ -1,5 +1,5 @@
-// degen.js — JTF DEGEN v0.8 (Engine Fix)
-// Utilise le moteur de data de autoselect.js pour garantir la lecture du BTC.
+// degen.js — JTF DEGEN v0.9 (Robust Fix)
+// Intègre le "Retry Pattern" pour ne pas planter si le BTC est illisible une seconde.
 
 import fetch from "node-fetch";
 
@@ -28,7 +28,7 @@ async function safeGetJson(url){
   try{ const r = await fetch(url,{ headers:{ Accept:"application/json" } }); return r.ok ? await r.json() : null; }catch{ return null; }
 }
 
-// ========= API BITGET (MOTEUR ROBUSTE AUTOSELECT) =========
+// ========= API BITGET (MOTEUR ROBUSTE) =========
 
 async function getCandles(symbol, seconds, limit=100){
   const base = baseSymbol(symbol);
@@ -45,16 +45,31 @@ async function getCandles(symbol, seconds, limit=100){
   return [];
 }
 
+// 🔥 NOUVELLE FONCTION ROBUSTE (RETRY PATTERN) 🔥
 async function getBTCTrend() {
-  const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
-  if (!candles || candles.length < 2) return null;
-
-  const current = candles[candles.length - 1];
-  const open = current.o;
-  const close = current.c;
+  const MAX_RETRIES = 3; // On insiste 3 fois
   
-  if (!open) return 0;
-  return ((close - open) / open) * 100;
+  for(let i = 0; i < MAX_RETRIES; i++) {
+    const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
+    
+    if (candles && candles.length >= 2) {
+      // Succès !
+      const current = candles[candles.length - 1];
+      const open = current.o;
+      const close = current.c;
+      if (!open) return 0;
+      return ((close - open) / open) * 100;
+    }
+    
+    // Si échec, on attend avant de réessayer
+    if (i < MAX_RETRIES - 1) {
+      console.log(`⚠️ DEGEN: Echec lecture BTC (Tentative ${i+1}/${MAX_RETRIES})... Retry dans 2s.`);
+      await sleep(2000); 
+    }
+  }
+
+  // Echec total après 3 essais
+  return null;
 }
 
 async function updateDegenList() {
@@ -162,17 +177,18 @@ function checkAntiSpam(symbol, direction){
 
 async function scanDegen(){
   const now = Date.now();
+  // Appel sécurisé qui réessaiera 3 fois si besoin
   const btcChange = await getBTCTrend();
   
   if (btcChange == null || isNaN(btcChange)) {
-    console.error("⚠️ BTC DATA ERROR: Scan Degen temporairement annulé.");
+    console.error("⚠️ BTC DATA ERROR après retry : Scan Degen temporairement annulé.");
     return;
   }
 
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DEGEN_SYMBOLS.length === 0){
     DEGEN_SYMBOLS = await updateDegenList(); lastSymbolUpdate = now;
   }
-  console.log(`🎰 DEGEN Scan | BTC: ${btcChange.toFixed(2)}%`);
+  console.log(`🎰 DEGEN v0.9 | BTC: ${btcChange.toFixed(2)}% | Scan ${DEGEN_SYMBOLS.length} paires`);
   
   const BATCH_SIZE = 5; const candidates = [];
   for(let i=0; i<DEGEN_SYMBOLS.length; i+=BATCH_SIZE){
@@ -191,7 +207,7 @@ async function scanDegen(){
     
     const levierConseille = c.riskPct > 5 ? "2x" : "3x";
 
-    const msg = `🎰 *JTF DEGEN v0.8 (Engine Fix)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    const msg = `🎰 *JTF DEGEN v0.9 (Robust Fix)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
@@ -199,8 +215,8 @@ async function scanDegen(){
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.8 (Engine Fix) démarré.");
-  await sendTelegram("🎰 *JTF DEGEN v0.8 (Moteur BTC Robuste) activé.*");
+  console.log("🔥 JTF DEGEN v0.9 (Robust Fix) démarré.");
+  await sendTelegram("🎰 *JTF DEGEN v0.9 (Moteur BTC Robuste) activé.*");
   while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Crash:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
