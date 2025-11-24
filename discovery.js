@@ -1,10 +1,13 @@
-// discovery.js — JTF DISCOVERY v1.0 (Midcaps Momentum Scanner)
-// ARCHITECTURE : Robust BTC Retry + Single-Shot + Global Cooldown (30m)
-// LOGIQUE : Midcap Scoring (Vol > 1.8, No Wicks, Clean VWAP Gap)
-
 import fetch from "node-fetch";
-import { loadJson } from "./config/loadJson.js";
-const top30 = loadJson("./config/top30.json");
+import fs from "fs";
+
+// Charge JSON via helper interne (compatible Railway)
+function loadJson(path) {
+  return JSON.parse(fs.readFileSync(path, "utf8"));
+}
+
+// (Optionnel) Si un jour Discovery doit exclure le Top30
+// const top30 = loadJson("./config/top30.json");
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
