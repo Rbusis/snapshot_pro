@@ -1,15 +1,18 @@
-// degen.js — JTF DEGEN v1.0 (Lowcaps Momentum Sniper)
-// ARCHITECTURE : Robust BTC Retry + Single-Shot + Global Cooldown (15m)
-// LOGIQUE : Momentum Sniper (VolRatio > 2.5, Wicks Filters, VWAP Gaps)
-
+// Imports
 import fetch from "node-fetch";
-import { loadJson } from "./config/loadJson.js";
+import fs from "fs";
+
+// Charge Top 30 (compatibilité Railway)
+function loadJson(path) {
+  return JSON.parse(fs.readFileSync(path, "utf8"));
+}
+
 const top30 = loadJson("./config/top30.json");
 
+// Charge la liste Discovery depuis son fichier JSON
 function getDiscoveryList() {
   try {
-    const raw = fs.readFileSync("./config/discovery_list.json", "utf8");
-    return JSON.parse(raw);
+    return loadJson("./config/discovery_list.json");
   } catch (e) {
     console.log("⚠️ discovery_list.json introuvable — fallback []");
     return [];
