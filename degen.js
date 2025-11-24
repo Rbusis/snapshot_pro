@@ -1,6 +1,6 @@
-// degen.js — JTF DEGEN v0.1 (Low-Caps & Hidden Gems)
-// Cible : Rangs #81 à #180 du volume (Les "Low Caps").
-// Stratégie : Momentum 5m + Order Book (Même moteur que Discovery v0.4).
+// degen.js — JTF DEGEN v0.2 (Sniper Mode)
+// Cible : Rangs #51 à #150 de la liste dynamique (Low-Caps).
+// FILTRES EXTRÊMES : Score >= 80 | Volume >= x2.0 | Order Book Validé
 
 import fetch from "node-fetch";
 
@@ -16,7 +16,7 @@ let DEGEN_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// On garde une liste de secours au cas où
+// Liste de secours
 const FALLBACK_LOWCAPS = ["MAGICUSDT_UMCBL","GALAUSDT_UMCBL","ONEUSDT_UMCBL","CELOUSDT_UMCBL","KAVAUSDT_UMCBL"];
 
 // On ignore la liste fixe du Bot 1
@@ -57,18 +57,17 @@ async function updateDegenList() {
     const valid = j.data.filter(t => 
       t.symbol.endsWith("_UMCBL") && 
       !t.symbol.startsWith("USDC") &&
-      (+t.usdtVolume > 1000000) && // On accepte un volume plus faible (1M$) pour les Low Caps
+      (+t.usdtVolume > 1000000) && 
       !IGNORE_LIST.includes(t.symbol)
     );
 
     // 2. Tri par volume
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
 
-    // 3. SELECTION : On saute les 50 premiers (gérés par Discovery) et on prend les 100 suivants
-    // Donc on scanne du rang #51 au rang #150 de la liste restante
+    // 3. SELECTION : On saute les 50 premiers (Discovery) et on prend les 100 suivants (Low Caps)
     const lowCaps = valid.slice(50, 150).map(t => t.symbol);
 
-    console.log(`🔄 DEGEN List mise à jour : ${lowCaps.length} paires (De ${lowCaps[0]} à la fin)`);
+    console.log(`🔄 DEGEN List (Sniper): ${lowCaps.length} paires (De ${lowCaps[0]} à la fin)`);
     return lowCaps.length > 5 ? lowCaps : FALLBACK_LOWCAPS;
 
   } catch (e) {
@@ -149,13 +148,15 @@ async function processDegen(symbol) {
   return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0, obScore, bidsVol, asksVol };
 }
 
-// ========= LOGIQUE SIGNAL DEGEN =========
+// ========= LOGIQUE SIGNAL DEGEN (SNIPER) =========
 function analyzeCandidate(rec) {
-  // Filtres
-  if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 1.0) return null;
+  // FILTRE 1 : VOLRATIO >= 2.0 (On veut du x2 minimum)
+  if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 2.0) return null;
+  
+  // Anti-FOMO
   if (rec.rsi5 > 82) return null; 
   if (rec.rsi5 < 18) return null;
-  if (Math.abs(rec.priceVsVwap) > 5.0) return null; // On tolère un peu plus d'écart sur les shitcoins (5%)
+  if (Math.abs(rec.priceVsVwap) > 5.0) return null; 
 
   let direction = null, score = 0, reason = "";
 
@@ -163,34 +164,38 @@ function analyzeCandidate(rec) {
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
     if (rec.obScore >= 0) {
         let s = 50;
-        if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
+        if (rec.volRatio > 3.0) s += 20; else if (rec.volRatio > 2.0) s += 10; // Bonus pour x3
         if (rec.rsi5 > 60) s += 10;
         if (rec.change24 > 3) s += 10; 
         if (rec.obScore === 1) s += 10;
-        if (s >= 70) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bull`; }
+
+        // FILTRE 2 : SCORE >= 80
+        if (s >= 80) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bull`; }
     }
   }
   // SHORT
   else if (rec.priceVsVwap < -0.3 && rec.rsi15 < 50 && rec.rsi5 < 45 && rec.rsi5 > 20) {
     if (rec.obScore <= 0) {
         let s = 50;
-        if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
+        if (rec.volRatio > 3.0) s += 20; else if (rec.volRatio > 2.0) s += 10;
         if (rec.rsi5 < 40) s += 10;
         if (rec.change24 < -3) s += 10;
         if (rec.obScore === -1) s += 10;
-        if (s >= 70) { direction = "SHORT"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bear`; }
+
+        // FILTRE 2 : SCORE >= 80
+        if (s >= 80) { direction = "SHORT"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bear`; }
     }
   }
 
   if (!direction) return null;
 
-  // Money Management DEGEN (Plus large)
+  // Money Management DEGEN
   const riskMult = 2.0; 
   const slDist = (rec.volaPct / 5) * riskMult;
-  const riskPct = clamp(slDist, 2.0, 10.0); // SL Max 10% sur les Degen
+  const riskPct = clamp(slDist, 2.0, 10.0); // SL Max 10%
   
   const sl = direction === "LONG" ? rec.last * (1 - riskPct/100) : rec.last * (1 + riskPct/100);
-  const tp = direction === "LONG" ? rec.last * (1 + (riskPct * 3)/100) : rec.last * (1 - (riskPct * 3)/100); // TP x3
+  const tp = direction === "LONG" ? rec.last * (1 + (riskPct * 3)/100) : rec.last * (1 - (riskPct * 3)/100);
   const obRatio = rec.asksVol > 0 ? (rec.bidsVol / rec.asksVol).toFixed(2) : "N/A";
 
   return { symbol: rec.symbol, direction, score, reason, price: rec.last, sl: num(sl, rec.last<1?5:3), tp: num(tp, rec.last<1?5:3), riskPct: num(riskPct, 2), volRatio: num(rec.volRatio, 1), vola: num(rec.volaPct, 1), obRatio };
@@ -229,11 +234,11 @@ async function scanDegen(){
   
   for(const c of best){
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
-    const emoji = c.direction === "LONG" ? "💎" : "💣"; // Emojis différents pour le Degen
+    const emoji = c.direction === "LONG" ? "💎" : "💣"; 
     
     let footer = "_Zone DEGEN (Risque Élevé)_";
-    if (c.volRatio >= 3.0) footer = "🔥 MEGA PUMP DÉTECTÉ !";
-    else if (c.volRatio >= 2.0) footer = "⚡ Volatilité extrême";
+    if (c.volRatio >= 4.0) footer = "🔥 MEGA PUMP (x4) : ALERTE MAXIMALE !";
+    else if (c.volRatio >= 3.0) footer = "⚡ Volatilité extrême (x3)";
 
     const msg = `🎰 *JTF DEGEN (Low-Caps)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
     
@@ -243,8 +248,8 @@ async function scanDegen(){
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.1 démarré.");
-  await sendTelegram("🎰 *JTF DEGEN (Low-Caps #81-#180) activé.*");
+  console.log("🔥 JTF DEGEN v0.2 démarré.");
+  await sendTelegram("🎰 *JTF DEGEN (Sniper Mode 80+) activé.*");
   while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Loop Error:", e.message); } await sleep(SCAN_INTERVAL_MS); }
 }
 
