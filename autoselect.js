@@ -3,17 +3,6 @@
 // Sortie : blocs Telegram avec emojis, max 3 trades, aucun fichier écrit.
 
 import fetch from "node-fetch";
-import http from "http"; // <--- AJOUT IMPORTANT POUR RAILWAY
-
-// ========= RAILWAY KEEPALIVE =========
-// Empêche Railway de tuer le bot (erreur SIGTERM)
-const PORT = process.env.PORT || 8080;
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("JTF Bot is running...");
-}).listen(PORT, () => {
-  console.log(`🛡️ Serveur KeepAlive écoute sur le port ${PORT}`);
-});
 
 // ========= CONFIG =========
 
@@ -1101,4 +1090,5 @@ async function main(){
   }
 }
 
-main();
+export const startAutoselect = main;
+
