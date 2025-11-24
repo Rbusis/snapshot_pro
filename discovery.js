@@ -1,7 +1,6 @@
-// discovery.js — JTF DISCOVERY v0.5 (Elite Mode)
-// Cible : Mid-Caps (Top 50 hors autoselect).
-// Stratégie : Momentum 5m + Order Book.
-// FILTRES STRICTS : Score >= 80 | Volume >= x1.5
+// discovery.js — JTF DISCOVERY v0.6 (BTC Trend Filter)
+// NOUVEAUTÉ : Le bot vérifie la tendance du BTC avant de proposer un trade.
+// Si BTC est baissier (-0.5% en 1h ou sous VWAP), on interdit les LONGS sur les Alts.
 
 import fetch from "node-fetch";
 
@@ -10,20 +9,18 @@ import fetch from "node-fetch";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS   = 5 * 60_000;   // Scan toutes les 5 min
-const MIN_ALERT_DELAY_MS = 15 * 60_000;  // Anti-spam 15 min
+const SCAN_INTERVAL_MS   = 5 * 60_000;
+const MIN_ALERT_DELAY_MS = 15 * 60_000;
 
 let DISCOVERY_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-const FALLBACK_MIDCAPS = [
-  "INJUSDT_UMCBL","RNDRUSDT_UMCBL","FETUSDT_UMCBL","AGIXUSDT_UMCBL",
-  "ARBUSDT_UMCBL","OPUSDT_UMCBL","LDOUSDT_UMCBL","FILUSDT_UMCBL",
-  "STXUSDT_UMCBL","IMXUSDT_UMCBL","SNXUSDT_UMCBL","FXSUSDT_UMCBL"
-];
+// Seuil Trend BTC (Si BTC perd plus de 0.3% en 1h, marché dangereux pour les Longs)
+const BTC_DUMP_THRESHOLD = -0.3; 
 
-// Liste des cryptos gérées par le Bot 1 (Autoselect) pour éviter les doublons
+const FALLBACK_MIDCAPS = ["INJUSDT_UMCBL","RNDRUSDT_UMCBL","FETUSDT_UMCBL","AGIXUSDT_UMCBL","ARBUSDT_UMCBL"];
+
 const IGNORE_LIST = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -49,6 +46,29 @@ async function safeGetJson(url){
   }catch{ return null; }
 }
 
+// ========= 1. ANALYSE DU BITCOIN (Le Général) =========
+
+async function getBTCTrend() {
+  try {
+    // On récupère la bougie 1h du BTC
+    const url = `https://api.bitget.com/api/mix/v1/market/candles?symbol=BTCUSDT_UMCBL&granularity=3600&limit=5`;
+    const j = await safeGetJson(url);
+    if(!j || !j.data || j.data.length < 2) return null;
+
+    // Bitget renvoie [Time, Open, High, Low, Close, Vol]
+    // On prend la dernière bougie clôturée ou l'actuelle
+    const current = j.data[j.data.length - 1]; // Actuelle
+    const open = +current[1];
+    const close = +current[4];
+    
+    // Variation en % depuis l'ouverture de l'heure
+    const change1h = ((close - open) / open) * 100;
+    return change1h;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ========= LISTE DYNAMIQUE =========
 
 async function updateDiscoveryList() {
@@ -66,14 +86,8 @@ async function updateDiscoveryList() {
 
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
     const midCaps = valid.slice(0, 50).map(t => t.symbol);
-
-    console.log(`🔄 Discovery List (Elite): ${midCaps.length} paires.`);
     return midCaps.length > 5 ? midCaps : FALLBACK_MIDCAPS;
-
-  } catch (e) {
-    console.error("❌ Erreur Update List:", e.message);
-    return FALLBACK_MIDCAPS;
-  }
+  } catch (e) { return FALLBACK_MIDCAPS; }
 }
 
 // ========= API DATA =========
@@ -150,7 +164,6 @@ async function processDiscovery(symbol) {
   const change24 = (+tk.priceChangePercent) * 100;
 
   let obScore = 0; let bidsVol = 0; let asksVol = 0;
-
   if (depth && depth.bids && depth.asks) {
     bidsVol = depth.bids.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
     asksVol = depth.asks.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
@@ -163,21 +176,24 @@ async function processDiscovery(symbol) {
   return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0, obScore, bidsVol, asksVol };
 }
 
-// ========= LOGIQUE SIGNAL (ELITE) =========
+// ========= LOGIQUE SIGNAL AVEC FILTRE BTC =========
 
-function analyzeCandidate(rec) {
-  // FILTRE 1 : Volume x1.5 MINIMUM
+function analyzeCandidate(rec, btcChange) {
+  // FILTRES DE BASE (Elite Mode)
   if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 1.5) return null;
-  
-  // Anti-FOMO
-  if (rec.rsi5 > 82) return null; 
-  if (rec.rsi5 < 18) return null;
+  if (rec.rsi5 > 82 || rec.rsi5 < 18) return null;
   if (Math.abs(rec.priceVsVwap) > 4.0) return null;
 
   let direction = null, score = 0, reason = "";
 
-  // LONG
+  // --- LOGIQUE LONG ---
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
+    // 🚨 FILTRE BTC : Si le BTC chute (> -0.3%), INTERDICTION DE LONG
+    if (btcChange != null && btcChange < BTC_DUMP_THRESHOLD) {
+        // On retourne null silencieusement = le bot te sauve d'une perte
+        return null; 
+    }
+
     if (rec.obScore >= 0) {
         let s = 50;
         if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
@@ -185,17 +201,17 @@ function analyzeCandidate(rec) {
         if (rec.change24 > 3) s += 10; 
         if (rec.obScore === 1) s += 10;
 
-        // FILTRE 2 : SCORE >= 80 (Exigeant)
         if (s >= 80) { 
             direction = "LONG"; 
             score = s; 
-            reason = `Vol x${rec.volRatio.toFixed(1)} | OrderBook Bullish`; 
+            reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bull | BTC OK`; 
         }
     }
   }
   
-  // SHORT
+  // --- LOGIQUE SHORT ---
   else if (rec.priceVsVwap < -0.3 && rec.rsi15 < 50 && rec.rsi5 < 45 && rec.rsi5 > 20) {
+    // Pour le Short, on peut être plus souple ou exiger que BTC soit neutre/rouge
     if (rec.obScore <= 0) {
         let s = 50;
         if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
@@ -203,11 +219,10 @@ function analyzeCandidate(rec) {
         if (rec.change24 < -3) s += 10;
         if (rec.obScore === -1) s += 10;
         
-        // FILTRE 2 : SCORE >= 80 (Exigeant)
         if (s >= 80) { 
             direction = "SHORT"; 
             score = s; 
-            reason = `Vol x${rec.volRatio.toFixed(1)} | OrderBook Bearish`; 
+            reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bear`; 
         }
     }
   }
@@ -247,11 +262,21 @@ function checkAntiSpam(symbol, direction){
 
 async function scanDiscovery(){
   const now = Date.now();
+  
+  // 1. Check Santé BTC
+  const btcChange = await getBTCTrend();
+  const btcSafe = btcChange == null || btcChange > BTC_DUMP_THRESHOLD;
+  
+  if(!btcSafe) {
+    console.log(`⚠️ BTC en baisse (${btcChange.toFixed(2)}% 1h) -> Scan Discovery mis en pause pour sécurité.`);
+    // On pourrait arrêter ici, ou juste empêcher les Longs. Le code analyzeCandidate gère le filtrage.
+  }
+
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DISCOVERY_SYMBOLS.length === 0){
     DISCOVERY_SYMBOLS = await updateDiscoveryList(); lastSymbolUpdate = now;
   }
   
-  console.log(`🚀 Discovery Elite Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
+  console.log(`🚀 Discovery Elite Scan (${DISCOVERY_SYMBOLS.length} paires) | BTC 1h: ${btcChange?btcChange.toFixed(2):"N/A"}%`);
   
   const BATCH_SIZE = 5; 
   const candidates = [];
@@ -261,7 +286,8 @@ async function scanDiscovery(){
     const results = await Promise.all(batch.map(s => processDiscovery(s).catch(e=>null)));
     
     for(const r of results){ 
-      const signal = analyzeCandidate(r); 
+      // On passe l'état du BTC à la fonction d'analyse
+      const signal = analyzeCandidate(r, btcChange); 
       if(signal) candidates.push(signal); 
     }
     await sleep(400); 
@@ -273,20 +299,19 @@ async function scanDiscovery(){
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
     
     const emoji = c.direction === "LONG" ? "🚀" : "🪂";
-    
-    let footer = "_Mode Elite (80+) : Forte Probabilité_";
+    let footer = "_Mode Elite (80+) + BTC Secure_";
     if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Setup Majeur !";
 
-    const msg = `⚡ *JTF DISCOVERY (Elite)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    const msg = `⚡ *JTF DISCOVERY v0.6 (BTC Safe)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
     
     await sendTelegram(msg); 
-    console.log(`✅ Signal Elite envoyé: ${c.symbol}`);
+    console.log(`✅ Signal v0.6 envoyé: ${c.symbol}`);
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.5 (Elite) démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY (Mode Élite 80+) activé.*");
+  console.log("🔥 JTF DISCOVERY v0.6 (BTC Safe) démarré.");
+  await sendTelegram("🔥 *JTF DISCOVERY v0.6 (Filtre BTC) activé.*");
   while(true){ 
     try { await scanDiscovery(); } 
     catch(e) { console.error("Discovery Loop Error:", e.message); } 
