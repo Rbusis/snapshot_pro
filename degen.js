@@ -1,5 +1,5 @@
-// degen.js — JTF DEGEN v0.7 (Fail-Safe Fix)
-// CORRECTIF : Arrêt total si BTC illisible.
+// degen.js — JTF DEGEN v0.8 (Engine Fix)
+// Utilise le moteur de data de autoselect.js pour garantir la lecture du BTC.
 
 import fetch from "node-fetch";
 
@@ -18,23 +18,43 @@ const lastAlerts = new Map();
 const FALLBACK_LOWCAPS = ["MAGICUSDT_UMCBL","GALAUSDT_UMCBL","ONEUSDT_UMCBL","CELOUSDT_UMCBL","KAVAUSDT_UMCBL"];
 const IGNORE_LIST = ["BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL","ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL","LINKUSDT_UMCBL","TONUSDT_UMCBL","SUIUSDT_UMCBL","APTUSDT_UMCBL","NEARUSDT_UMCBL","ARBUSDT_UMCBL","OPUSDT_UMCBL","INJUSDT_UMCBL","ATOMUSDT_UMCBL","AAVEUSDT_UMCBL","LTCUSDT_UMCBL","UNIUSDT_UMCBL","FILUSDT_UMCBL","XLMUSDT_UMCBL","RUNEUSDT_UMCBL","ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"];
 
+// Utils
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const baseSymbol = s => s.replace("_UMCBL","");
 
-async function safeGetJson(url){ try{ const r = await fetch(url,{ headers:{ Accept:"application/json" } }); return r.ok ? await r.json() : null; }catch{ return null; } }
+async function safeGetJson(url){
+  try{ const r = await fetch(url,{ headers:{ Accept:"application/json" } }); return r.ok ? await r.json() : null; }catch{ return null; }
+}
+
+// ========= API BITGET (MOTEUR ROBUSTE AUTOSELECT) =========
+
+async function getCandles(symbol, seconds, limit=100){
+  const base = baseSymbol(symbol);
+  // Essai V2
+  let j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`);
+  if(j?.data?.length){
+    return j.data.map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] })).sort((a,b)=>a.t-b.t);
+  }
+  // Fallback V1
+  j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}`);
+  if(j?.data?.length){
+    return j.data.map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] })).sort((a,b)=>a.t-b.t);
+  }
+  return [];
+}
 
 async function getBTCTrend() {
-  try {
-    const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=BTCUSDT_UMCBL&granularity=3600&limit=5`);
-    if(!j?.data || j.data.length < 2) return null;
-    const current = j.data[j.data.length - 1];
-    const open = +current[1];
-    const close = +current[4];
-    if(!open) return 0;
-    return ((close - open) / open) * 100;
-  } catch { return null; }
+  const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
+  if (!candles || candles.length < 2) return null;
+
+  const current = candles[candles.length - 1];
+  const open = current.o;
+  const close = current.c;
+  
+  if (!open) return 0;
+  return ((close - open) / open) * 100;
 }
 
 async function updateDegenList() {
@@ -50,9 +70,10 @@ async function updateDegenList() {
 }
 
 async function getTicker(symbol){ const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`); return j?.data ?? null; }
-async function getCandles(symbol, s, l=100){ const b = baseSymbol(symbol); const j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${b}&granularity=${s}&productType=usdt-futures&limit=${l}`); return j?.data?.map(c=>({t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]})).sort((a,b)=>a.t-b.t)??[]; }
 async function getFunding(symbol){ const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/currentFundRate?symbol=${symbol}`); return j?.data ?? null; }
 async function getDepth(symbol){ const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/depth?symbol=${symbol}&limit=20`); return (j?.data?.bids && j?.data?.asks) ? j.data : null; }
+
+// ========= INDICATEURS =========
 
 function rsi(c,p=14){ if(c.length<p+1) return null; let g=0,l=0; for(let i=1;i<=p;i++){ const d=c[i]-c[i-1]; d>=0?g+=d:l-=d; } g/=p; l=(l/p)||1e-9; let rs=g/l; let v=100-100/(1+rs); for(let i=p+1;i<c.length;i++){ const d=c[i]-c[i-1]; g=(g*(p-1)+Math.max(d,0))/p; l=((l*(p-1)+Math.max(-d,0))/p)||1e-9; rs=g/l; v=100-100/(1+rs); } return v; }
 function vwap(c){ let pv=0,v=0; for(const x of c){ const p=(x.h+x.l+x.c)/3; pv+=p*x.v; v+=x.v; } return v?pv/v:null; }
@@ -61,6 +82,7 @@ async function processDegen(symbol) {
   const [tk, fr, depth] = await Promise.all([getTicker(symbol), getFunding(symbol), getDepth(symbol)]);
   if(!tk) return null;
   const last=+tk.last; 
+  
   const [c5m, c15m] = await Promise.all([getCandles(symbol, 300), getCandles(symbol, 900)]);
   if(c5m.length < 50) return null;
 
@@ -90,9 +112,8 @@ function analyzeCandidate(rec, btcChange) {
   let direction=null, score=0, reason="";
 
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    // SÉCURITÉ BTC
     if (btcChange == null || isNaN(btcChange)) return null; 
-    if (btcChange < BTC_DUMP_THRESHOLD) return null;
+    if (btcChange < BTC_DUMP_THRESHOLD) return null; 
 
     if (rec.obScore >= 0) {
       let s=50;
@@ -143,9 +164,8 @@ async function scanDegen(){
   const now = Date.now();
   const btcChange = await getBTCTrend();
   
-  // BLOQUEUR GÉNÉRAL
   if (btcChange == null || isNaN(btcChange)) {
-    console.error("🚨 ERREUR CRITIQUE : Impossible de lire le BTC. Scan Degen ANNULÉ.");
+    console.error("⚠️ BTC DATA ERROR: Scan Degen temporairement annulé.");
     return;
   }
 
@@ -171,7 +191,7 @@ async function scanDegen(){
     
     const levierConseille = c.riskPct > 5 ? "2x" : "3x";
 
-    const msg = `🎰 *JTF DEGEN v0.7 (Safe)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    const msg = `🎰 *JTF DEGEN v0.8 (Engine Fix)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
@@ -179,9 +199,9 @@ async function scanDegen(){
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.7 (Safe) démarré.");
-  await sendTelegram("🎰 *JTF DEGEN v0.7 (Sécurité BTC Active) activé.*");
-  while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Error:", e); } await sleep(SCAN_INTERVAL_MS); }
+  console.log("🔥 JTF DEGEN v0.8 (Engine Fix) démarré.");
+  await sendTelegram("🎰 *JTF DEGEN v0.8 (Moteur BTC Robuste) activé.*");
+  while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Crash:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
 export const startDegen = main;
