@@ -3,6 +3,8 @@
 // FILTRE STRICT : Uniquement les signaux "TAKE". Silence radio sinon.
 
 import fetch from "node-fetch";
+import { loadJson } from "./config/loadJson.js";
+const top30 = loadJson("./config/top30.json");
 
 // ========= CONFIG =========
 
