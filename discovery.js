@@ -1,5 +1,5 @@
-// discovery.js — JTF DISCOVERY v0.7 (Smart Entry)
-// Ajout du calcul "Entry Limit" pour optimiser les entrées et éviter le FOMO.
+// discovery.js — JTF DISCOVERY v0.7 (Smart Entry + Levier)
+// Ajout du calcul "Entry Limit" et "Levier" pour optimiser les entrées.
 
 import fetch from "node-fetch";
 
@@ -108,8 +108,6 @@ function analyzeCandidate(rec, btcChange) {
   if (!direction) return null;
 
   // --- SMART ENTRY CALCULATION ---
-  // On calcule un pullback basé sur la volatilité. 
-  // Plus ça bouge, plus on attend un repli profond (0.3% à 0.8%).
   const pullbackPct = clamp(rec.volaPct / 20, 0.3, 1.0); 
   
   let limitEntry;
@@ -118,7 +116,6 @@ function analyzeCandidate(rec, btcChange) {
   } else {
     limitEntry = rec.last * (1 + pullbackPct/100);
   }
-  // -------------------------------
 
   const riskMult = 1.8; 
   const riskPct = clamp((rec.volaPct/5)*riskMult, 1.2, 6.0);
@@ -129,7 +126,7 @@ function analyzeCandidate(rec, btcChange) {
   return { 
     symbol:rec.symbol, direction, score, reason, 
     price:rec.last, 
-    limitEntry: num(limitEntry, rec.last<1?5:3), // Le nouveau prix à afficher
+    limitEntry: num(limitEntry, rec.last<1?5:3), 
     sl:num(sl, rec.last<1?5:3), 
     tp:num(tp, rec.last<1?5:3), 
     riskPct:num(riskPct,2), volRatio:num(rec.volRatio,1), vola:num(rec.volaPct,1), obRatio 
@@ -169,7 +166,11 @@ async function scanDiscovery(){
     let footer = "_Mode Elite (80+) | Smart Entry_";
     if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Setup Majeur";
 
-    const msg = `⚡ *JTF DISCOVERY v0.7 (Smart Entry)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    // Calcul du levier conseillé (Inverse du risque)
+    const levierConseille = c.riskPct > 4 ? "2x" : (c.riskPct > 2.5 ? "3x" : "4x");
+
+    const msg = `⚡ *JTF DISCOVERY v0.7 (Smart Entry)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    
     await sendTelegram(msg); 
     console.log(`✅ Signal Discovery envoyé: ${c.symbol}`);
   }
