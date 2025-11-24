@@ -2,8 +2,8 @@
 // ARCHITECTURE : Robust BTC Retry + Single-Shot + Global Cooldown (30m)
 // LOGIQUE : Midcap Scoring (Vol > 1.8, No Wicks, Clean VWAP Gap)
 
-import fs from "fs";
 import fetch from "node-fetch";
+import fs from "fs";
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
