@@ -1,10 +1,10 @@
-import fetch from "node-fetch";
-import fs from "fs";
+// discovery.js — JTF DISCOVERY v1.0 (Midcaps Momentum Scanner)
 
-// Charge JSON via helper interne (compatible Railway)
-function loadJson(path) {
-  return JSON.parse(fs.readFileSync(path, "utf8"));
-}
+import fetch from "node-fetch";
+import fs from "fs";                 // <--- MANQUAIT !!!
+import { loadJson } from "./config/loadJson.js";
+
+const top30 = loadJson("./config/top30.json");
 
 // (Optionnel) Si un jour Discovery doit exclure le Top30
 // const top30 = loadJson("./config/top30.json");
