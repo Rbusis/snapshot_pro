@@ -6,6 +6,16 @@ import fetch from "node-fetch";
 import fs from "fs";
 import top30 from "./config/top30.json" assert { type: "json" };
 
+function getDiscoveryList() {
+  try {
+    const raw = fs.readFileSync("./config/discovery_list.json", "utf8");
+    return JSON.parse(raw);
+  } catch (e) {
+    console.log("⚠️ discovery_list.json introuvable — fallback []");
+    return [];
+  }
+}
+
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
@@ -71,14 +81,32 @@ async function updateDegenList() {
   try {
     const j = await safeGetJson("https://api.bitget.com/api/mix/v1/market/tickers?productType=umcbl");
     if (!j?.data) return FALLBACK_LOWCAPS;
-    // Exclure les Top 30 (via IGNORE_LIST) et filtrer par volume > 1M
-    const valid = j.data.filter(t => t.symbol.endsWith("_UMCBL") && !t.symbol.startsWith("USDC") && (+t.usdtVolume > 1000000) && !IGNORE_LIST.includes(t.symbol));
+
+    const discoveryList = getDiscoveryList();
+
+    const valid = j.data.filter(t =>
+      t.symbol.endsWith("_UMCBL") &&
+      !t.symbol.startsWith("USDC") &&
+      (+t.usdtVolume > 1000000) &&
+      !IGNORE_LIST.includes(t.symbol)
+    );
+
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
-    // On prend du 30ème au 130ème environ pour être dans le mid/low cap
-    const lowCaps = valid.slice(0, 100).map(t => t.symbol);
-    console.log(`🔄 DEGEN List: ${lowCaps.length} paires.`);
+
+    let lowCaps = valid.map(t => t.symbol);
+
+    // 🔥 NOUVEAU : filtrage automatique
+    lowCaps = lowCaps.filter(sym =>
+      !top30.includes(sym) &&
+      !discoveryList.includes(sym)
+    );
+
+    console.log(`🔄 DEGEN List (filtrée): ${lowCaps.length} paires.`);
     return lowCaps.length > 5 ? lowCaps : FALLBACK_LOWCAPS;
-  } catch { return FALLBACK_LOWCAPS; }
+
+  } catch {
+    return FALLBACK_LOWCAPS;
+  }
 }
 
 async function getTicker(symbol){ const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`); return j?.data ?? null; }
