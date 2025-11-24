@@ -1,6 +1,6 @@
-// discovery.js — JTF DISCOVERY v0.2 (Mid-Caps & Gems)
-// Cible : Les 50 plus gros volumes HORS de la liste fixe Autoselect.
-// Stratégie : Momentum & Breakout (Long/Short) avec filtre de volume strict.
+// discovery.js — JTF DISCOVERY v0.3 (Turbo Mode 5m)
+// Réactivité augmentée : Analyse sur 5 minutes pour éviter d'acheter le top.
+// Filtres anti-FOMO ajoutés (RSI Max & Ecart VWAP).
 
 import fetch from "node-fetch";
 
@@ -9,26 +9,23 @@ import fetch from "node-fetch";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-// Scan toutes les 5 minutes
+// Scan toutes les 5 minutes (Synchro avec la bougie)
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 
-// Anti-spam par paire (10 min)
-const MIN_ALERT_DELAY_MS = 10 * 60_000;
+// Anti-spam par paire (15 min pour éviter de spammer le même pump)
+const MIN_ALERT_DELAY_MS = 15 * 60_000;
 
-// Mise à jour de la liste dynamique (toutes les heures)
+// Mise à jour liste toutes les heures
 let DISCOVERY_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// Liste de secours au cas où l'API listerait mal
 const FALLBACK_MIDCAPS = [
   "INJUSDT_UMCBL","RNDRUSDT_UMCBL","FETUSDT_UMCBL","AGIXUSDT_UMCBL",
   "ARBUSDT_UMCBL","OPUSDT_UMCBL","LDOUSDT_UMCBL","FILUSDT_UMCBL",
   "STXUSDT_UMCBL","IMXUSDT_UMCBL","SNXUSDT_UMCBL","FXSUSDT_UMCBL"
 ];
 
-// Liste des cryptos gérées par le Bot 1 (Autoselect)
-// On les ignore ici pour ne pas scanner en double.
 const IGNORE_LIST = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -38,7 +35,6 @@ const IGNORE_LIST = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
-// Mémoire
 const lastAlerts = new Map();
 
 // Utils
@@ -55,7 +51,7 @@ async function safeGetJson(url){
   }catch{ return null; }
 }
 
-// ========= LISTE DYNAMIQUE INTELLIGENTE =========
+// ========= LISTE DYNAMIQUE =========
 
 async function updateDiscoveryList() {
   try {
@@ -63,21 +59,17 @@ async function updateDiscoveryList() {
     const j = await safeGetJson(url);
     if (!j || !j.data) return FALLBACK_MIDCAPS;
 
-    // 1. On filtre : USDT, Volume > 5M$, et PAS dans la liste du Bot 1
     const valid = j.data.filter(t => 
       t.symbol.endsWith("_UMCBL") && 
       !t.symbol.startsWith("USDC") &&
       (+t.usdtVolume > 5000000) &&
-      !IGNORE_LIST.includes(t.symbol) // <--- C'est ici qu'on évite les doublons
+      !IGNORE_LIST.includes(t.symbol)
     );
 
-    // 2. On trie par volume décroissant (Les plus gros d'abord)
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
-
-    // 3. On prend les 50 premiers de cette liste "Reste du Monde"
     const midCaps = valid.slice(0, 50).map(t => t.symbol);
 
-    console.log(`🔄 Discovery List mise à jour : ${midCaps.length} paires (Leader: ${midCaps[0]})`);
+    console.log(`🔄 Discovery v0.3 List : ${midCaps.length} paires (Top: ${midCaps[0]})`);
     return midCaps.length > 5 ? midCaps : FALLBACK_MIDCAPS;
 
   } catch (e) {
@@ -124,65 +116,83 @@ function vwap(c){
   return v?pv/v:null;
 }
 
-// ========= ANALYSE TECHNIQUE =========
+// ========= ANALYSE TECHNIQUE (5 min) =========
 
 async function processDiscovery(symbol) {
   const [tk, fr] = await Promise.all([getTicker(symbol), getFunding(symbol)]);
   if(!tk) return null;
 
   const last = +tk.last;
-  // Candles 15m et 1h
-  const [c15m, c1h] = await Promise.all([getCandles(symbol, 900, 100), getCandles(symbol, 3600, 100)]);
-  if(c15m.length < 50 || c1h.length < 50) return null;
+  // MODIF v0.3 : On prend 5m (300s) et 15m (900s) au lieu de 15m/1h
+  const [c5m, c15m] = await Promise.all([getCandles(symbol, 300, 100), getCandles(symbol, 900, 100)]);
+  if(c5m.length < 50 || c15m.length < 50) return null;
 
-  const closes15 = c15m.map(x=>x.c); const closes1h = c1h.map(x=>x.c);
-  const rsi15 = rsi(closes15, 14); const rsi1h = rsi(closes1h, 14);
-  const vwap15 = vwap(c15m.slice(-24));
-  const priceVsVwap = vwap15 ? ((last - vwap15)/vwap15)*100 : 0;
+  const closes5  = c5m.map(x=>x.c); 
+  const closes15 = c15m.map(x=>x.c);
+  
+  const rsi5  = rsi(closes5, 14); 
+  const rsi15 = rsi(closes15, 14);
+  
+  // VWAP très court terme (sur les 2 dernières heures en 5m)
+  const vwap5 = vwap(c5m.slice(-24));
+  const priceVsVwap = vwap5 ? ((last - vwap5)/vwap5)*100 : 0;
 
-  // Volume Spike : Compare dernière bougie vs moyenne des 10 précédentes
-  const lastVol = c15m[c15m.length-1].v;
-  const avgVol  = c15m.slice(-11, -1).reduce((a,b)=>a+b.v, 0) / 10;
+  // Volume Spike sur le 5 minutes
+  const lastVol = c5m[c5m.length-1].v;
+  const avgVol  = c5m.slice(-11, -1).reduce((a,b)=>a+b.v, 0) / 10;
   const volRatio = avgVol > 0 ? lastVol / avgVol : 1;
 
   const high24 = +tk.high24h; const low24 = +tk.low24h;
   const volaPct = (high24 - low24) / last * 100;
   const change24 = (+tk.priceChangePercent) * 100;
 
-  return { symbol, last, volaPct, rsi15, rsi1h, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0 };
+  return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0 };
 }
 
-// ========= LOGIQUE SIGNAL (MOMENTUM) =========
+// ========= LOGIQUE SIGNAL (RAPIDE) =========
 
 function analyzeCandidate(rec) {
-  // FILTRE IMPORTANT : volRatio < 1.0 (on jette si pas de volume)
-  if(!rec || !rec.rsi15 || !rec.rsi1h || rec.volaPct < 3 || rec.volRatio < 1.0) return null;
+  // 1. Filtre Volume et Vola
+  if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 1.0) return null;
   
+  // 2. Filtre Anti-FOMO (Nouveau v0.3)
+  // Si le RSI 5m est déjà > 82, on est au sommet, trop tard.
+  if (rec.rsi5 > 82) return null; 
+  // Si le RSI 5m est < 18 (pour le short), trop tard.
+  if (rec.rsi5 < 18) return null;
+  
+  // Si le prix est parti trop loin du VWAP (> 4% d'écart), c'est une parabolique finie.
+  if (Math.abs(rec.priceVsVwap) > 4.0) return null;
+
   let direction = null, score = 0, reason = "";
 
-  // LONG (Achat)
-  if (rec.priceVsVwap > 0.5 && rec.rsi1h > 55 && rec.rsi15 > 50) {
+  // LONG (Sur 5 min)
+  // On cherche le début du pump : RSI entre 55 et 75
+  if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
     let s = 50;
     if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
-    if (rec.rsi15 > 60 && rec.rsi15 < 80) s += 10;
-    if (rec.change24 > 5) s += 10; // Trend Following
-    if (s >= 70) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI Bull`; }
+    if (rec.rsi5 > 60) s += 10;
+    if (rec.change24 > 3) s += 10; 
+    
+    if (s >= 70) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI 5m Bull`; }
   }
-  // SHORT (Vente)
-  else if (rec.priceVsVwap < -0.5 && rec.rsi1h < 45 && rec.rsi15 < 50) {
+  
+  // SHORT
+  else if (rec.priceVsVwap < -0.3 && rec.rsi15 < 50 && rec.rsi5 < 45 && rec.rsi5 > 20) {
     let s = 50;
-    if (rec.volRatio > 2.0) s += 15; else if (rec.volRatio > 1.5) s += 10;
-    if (rec.rsi15 < 40 && rec.rsi15 > 20) s += 10;
-    if (rec.change24 < -5) s += 10; // Trend Following
-    if (s >= 70) { direction = "SHORT"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI Bear`; }
+    if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
+    if (rec.rsi5 < 40) s += 10;
+    if (rec.change24 < -3) s += 10;
+    
+    if (s >= 70) { direction = "SHORT"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI 5m Bear`; }
   }
 
   if (!direction) return null;
 
-  // Money Management
-  const riskMult = 2.0; // Stop Loss large
+  // Stop Loss Dynamique (Adapté au 5m, un peu plus serré)
+  const riskMult = 1.8; 
   const slDist = (rec.volaPct / 5) * riskMult;
-  const riskPct = clamp(slDist, 1.5, 8.0);
+  const riskPct = clamp(slDist, 1.2, 6.0); // SL Max 6% maintenant
   
   const sl = direction === "LONG" ? rec.last * (1 - riskPct/100) : rec.last * (1 + riskPct/100);
   const tp = direction === "LONG" ? rec.last * (1 + (riskPct * 2.5)/100) : rec.last * (1 - (riskPct * 2.5)/100);
@@ -210,12 +220,11 @@ function checkAntiSpam(symbol, direction){
 
 async function scanDiscovery(){
   const now = Date.now();
-  // Mise à jour de la liste si vide ou si 1h passée
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DISCOVERY_SYMBOLS.length === 0){
     DISCOVERY_SYMBOLS = await updateDiscoveryList(); lastSymbolUpdate = now;
   }
   
-  console.log(`🚀 Discovery Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
+  console.log(`🚀 Discovery v0.3 Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
   
   const BATCH_SIZE = 5; 
   const candidates = [];
@@ -228,26 +237,25 @@ async function scanDiscovery(){
       const signal = analyzeCandidate(r); 
       if(signal) candidates.push(signal); 
     }
-    await sleep(500); // Pause pour respecter API
+    await sleep(400); 
   }
   
-  // On ne garde que les 2 meilleurs scores
   const best = candidates.sort((a,b) => b.score - a.score).slice(0, 2);
   
   for(const c of best){
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
     
     const emoji = c.direction === "LONG" ? "🚀" : "🪂";
-    const msg = `⚡ *JTF DISCOVERY (Mid-Caps)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n🌪️ Vola: ${c.vola}%\n📢 Volume: x${c.volRatio}\n\n_Levier faible (2x max)_`;
+    const msg = `⚡ *JTF DISCOVERY v0.3 (Fast 5m)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n🌪️ Vola: ${c.vola}%\n📢 Volume: x${c.volRatio}\n\n_Mode Rapide : Entrée immédiate conseillée_`;
     
     await sendTelegram(msg); 
-    console.log(`✅ Signal Discovery envoyé: ${c.symbol}`);
+    console.log(`✅ Signal Rapide envoyé: ${c.symbol}`);
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.2 Engine démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY (Mid-Caps) connecté au serveur central.*");
+  console.log("🔥 JTF DISCOVERY v0.3 (Turbo) démarré.");
+  await sendTelegram("🔥 *JTF DISCOVERY v0.3 (Mode Rapide 5m) activé.*");
   while(true){ 
     try { await scanDiscovery(); } 
     catch(e) { console.error("Discovery Loop Error:", e.message); } 
@@ -255,5 +263,4 @@ async function main(){
   }
 }
 
-// EXPORT ESSENTIEL POUR INDEX.JS
 export const startDiscovery = main;
