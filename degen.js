@@ -1,5 +1,6 @@
-// degen.js — JTF DEGEN v0.10 (Calm Mode)
-// Mises à jour : Single-Shot + Global Cooldown (15m) + Retry Pattern
+// degen.js — JTF DEGEN v1.0 (Lowcaps Momentum Sniper)
+// ARCHITECTURE : Robust BTC Retry + Single-Shot + Global Cooldown (15m)
+// LOGIQUE : Momentum Sniper (VolRatio > 2.5, Wicks Filters, VWAP Gaps)
 
 import fetch from "node-fetch";
 
@@ -8,13 +9,16 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 const MIN_ALERT_DELAY_MS = 15 * 60_000;     // Anti-spam par paire
-const GLOBAL_COOLDOWN_MS = 15 * 60_000;     // 🔥 NOUVEAU : 15 min de pause après un trade global (Degen est plus rapide)
-const BTC_DUMP_THRESHOLD = -0.3;            // On garde -0.3 pour Degen (plus tolérant que Discovery)
+const GLOBAL_COOLDOWN_MS = 15 * 60_000;     // Pause après un tir
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
+
+// Config Sécurité BTC (Prompt)
+const BTC_DUMP_THRESHOLD_LONG = -0.7; // Pas de LONG si BTC < -0.7%
+const BTC_PUMP_THRESHOLD_SHORT = 1.0; // Pas de SHORT si BTC > 1.0%
 
 let DEGEN_SYMBOLS = [];
 let lastSymbolUpdate = 0;
-let lastGlobalTradeTime = 0; // 🔥 NOUVEAU : Timestamp du dernier signal envoyé
+let lastGlobalTradeTime = 0;
 const lastAlerts = new Map();
 
 const FALLBACK_LOWCAPS = ["MAGICUSDT_UMCBL","GALAUSDT_UMCBL","ONEUSDT_UMCBL","CELOUSDT_UMCBL","KAVAUSDT_UMCBL"];
@@ -34,12 +38,10 @@ async function safeGetJson(url){
 
 async function getCandles(symbol, seconds, limit=100){
   const base = baseSymbol(symbol);
-  // Essai V2
   let j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`);
   if(j?.data?.length){
     return j.data.map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] })).sort((a,b)=>a.t-b.t);
   }
-  // Fallback V1
   j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}`);
   if(j?.data?.length){
     return j.data.map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] })).sort((a,b)=>a.t-b.t);
@@ -47,12 +49,10 @@ async function getCandles(symbol, seconds, limit=100){
   return [];
 }
 
-// 🔥 FONCTION ROBUSTE (RETRY PATTERN) 🔥
 async function getBTCTrend() {
   const MAX_RETRIES = 3; 
   for(let i = 0; i < MAX_RETRIES; i++) {
     const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
-    
     if (candles && candles.length >= 2) {
       const current = candles[candles.length - 1];
       const open = current.o;
@@ -60,11 +60,7 @@ async function getBTCTrend() {
       if (!open) return 0;
       return ((close - open) / open) * 100;
     }
-    
-    if (i < MAX_RETRIES - 1) {
-      console.log(`⚠️ DEGEN: Echec lecture BTC (Tentative ${i+1}/${MAX_RETRIES})... Retry dans 2s.`);
-      await sleep(2000); 
-    }
+    if (i < MAX_RETRIES - 1) await sleep(2000); 
   }
   return null;
 }
@@ -73,9 +69,11 @@ async function updateDegenList() {
   try {
     const j = await safeGetJson("https://api.bitget.com/api/mix/v1/market/tickers?productType=umcbl");
     if (!j?.data) return FALLBACK_LOWCAPS;
+    // Exclure les Top 30 (via IGNORE_LIST) et filtrer par volume > 1M
     const valid = j.data.filter(t => t.symbol.endsWith("_UMCBL") && !t.symbol.startsWith("USDC") && (+t.usdtVolume > 1000000) && !IGNORE_LIST.includes(t.symbol));
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
-    const lowCaps = valid.slice(50, 150).map(t => t.symbol);
+    // On prend du 30ème au 130ème environ pour être dans le mid/low cap
+    const lowCaps = valid.slice(0, 100).map(t => t.symbol);
     console.log(`🔄 DEGEN List: ${lowCaps.length} paires.`);
     return lowCaps.length > 5 ? lowCaps : FALLBACK_LOWCAPS;
   } catch { return FALLBACK_LOWCAPS; }
@@ -90,6 +88,16 @@ async function getDepth(symbol){ const j = await safeGetJson(`https://api.bitget
 function rsi(c,p=14){ if(c.length<p+1) return null; let g=0,l=0; for(let i=1;i<=p;i++){ const d=c[i]-c[i-1]; d>=0?g+=d:l-=d; } g/=p; l=(l/p)||1e-9; let rs=g/l; let v=100-100/(1+rs); for(let i=p+1;i<c.length;i++){ const d=c[i]-c[i-1]; g=(g*(p-1)+Math.max(d,0))/p; l=((l*(p-1)+Math.max(-d,0))/p)||1e-9; rs=g/l; v=100-100/(1+rs); } return v; }
 function vwap(c){ let pv=0,v=0; for(const x of c){ const p=(x.h+x.l+x.c)/3; pv+=p*x.v; v+=x.v; } return v?pv/v:null; }
 
+// Fonction pour calculer la taille des mèches (%)
+function calcWicks(candle) {
+  if(!candle) return { upper:0, lower:0 };
+  const bodyTop = Math.max(candle.o, candle.c);
+  const bodyBot = Math.min(candle.o, candle.c);
+  const upper = ((candle.h - bodyTop) / candle.c) * 100;
+  const lower = ((bodyBot - candle.l) / candle.c) * 100;
+  return { upper, lower };
+}
+
 async function processDegen(symbol) {
   const [tk, fr, depth] = await Promise.all([getTicker(symbol), getFunding(symbol), getDepth(symbol)]);
   if(!tk) return null;
@@ -103,6 +111,10 @@ async function processDegen(symbol) {
   const vwap5=vwap(c5m.slice(-24));
   const priceVsVwap=vwap5?((last-vwap5)/vwap5)*100:0;
   
+  // Wicks Analysis (sur la dernière bougie clôturée ou en cours si pertinent, ici dernière du tableau)
+  const currentCandle = c5m[c5m.length-1];
+  const wicks = calcWicks(currentCandle);
+
   const lastVol=c5m[c5m.length-1].v; const avgVol=c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio=avgVol>0?lastVol/avgVol:1;
   const volaPct=(+tk.high24h - +tk.low24h)/last*100;
@@ -114,52 +126,124 @@ async function processDegen(symbol) {
     if(asksVol>0){ const r=bidsVol/asksVol; if(r>1.2) obScore=1; else if(r<0.8) obScore=-1; }
   }
 
-  return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24:(+tk.priceChangePercent)*100, obScore, bidsVol, asksVol };
+  return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24:(+tk.priceChangePercent)*100, obScore, bidsVol, asksVol, wicks };
 }
 
+// ========= CERVEAU SNIPER =========
+
 function analyzeCandidate(rec, btcChange) {
-  if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 2.0) return null;
-  if (rec.rsi5 > 82 || rec.rsi5 < 18 || Math.abs(rec.priceVsVwap) > 5.0) return null;
+  // 1. HARD FILTERS (Éliminatoires)
+  if(!rec || btcChange == null) return null;
 
-  let direction=null, score=0, reason="";
+  // Filtre #1 : Volume Spike (Le facteur roi)
+  if (rec.volRatio < 2.5) return null; 
 
-  if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    if (btcChange == null || isNaN(btcChange)) return null; 
-    if (btcChange < BTC_DUMP_THRESHOLD) return null; 
+  // Filtre #5 : Volatilité saine (4-18%)
+  // Exception : Si volRatio > 4 (mega pump), on tolère une vola > 20%
+  if (rec.volaPct < 4) return null;
+  if (rec.volaPct > 18 && rec.volRatio < 4.0) return null;
 
-    if (rec.obScore >= 0) {
-      let s=50;
-      if(rec.volRatio>3.0) s+=20; else if(rec.volRatio>2.0) s+=10;
-      if(rec.rsi5>60) s+=10; if(rec.change24>3) s+=10; if(rec.obScore===1) s+=10;
-      if (s >= 80) { direction="LONG"; score=s; reason=`Vol x${rec.volRatio.toFixed(1)} | OB Bull`; }
-    }
-  } else if (rec.priceVsVwap < -0.3 && rec.rsi15 < 50 && rec.rsi5 < 45 && rec.rsi5 > 20) {
-    if (rec.obScore <= 0) {
-      let s=50;
-      if(rec.volRatio>3.0) s+=20; else if(rec.volRatio>2.0) s+=10;
-      if(rec.rsi5<40) s+=10; if(rec.change24<-3) s+=10; if(rec.obScore===-1) s+=10;
-      if (s >= 80) { direction="SHORT"; score=s; reason=`Vol x${rec.volRatio.toFixed(1)} | OB Bear`; }
-    }
+  // Filtre #2 : Gap VWAP Momentum (0.6% à 3.5%)
+  // On élimine si le prix est collé au VWAP (pas de momentum) ou trop loin (trop tard)
+  const gapAbs = Math.abs(rec.priceVsVwap);
+  if (gapAbs < 0.6) return null; // Trop mou
+  if (gapAbs > 4.5) return null; // Trop étendu
+
+  let direction = null;
+
+  // --- DÉTERMINATION DIRECTION & FILTRES SPÉCIFIQUES ---
+  
+  if (rec.priceVsVwap > 0) { // Potential LONG
+    // Filtres Long
+    if (btcChange < BTC_DUMP_THRESHOLD_LONG) return null; // BTC crash
+    if (rec.rsi5 > 82) return null;                       // RSI Surchauffe
+    if (rec.wicks.upper > 1.5) return null;               // Rejet (mèche haute)
+    if (rec.obScore < 0) return null;                     // Orderbook Bearish
+    direction = "LONG";
+  } 
+  else { // Potential SHORT
+    // Filtres Short
+    if (btcChange > BTC_PUMP_THRESHOLD_SHORT) return null;// BTC Pump
+    if (rec.rsi5 < 18) return null;                       // RSI Surchauffe bas
+    if (rec.wicks.lower > 1.5) return null;               // Rejet (mèche basse)
+    if (rec.obScore > 0) return null;                     // Orderbook Bullish
+    direction = "SHORT";
   }
 
   if (!direction) return null;
 
-  const pullbackPct = clamp(rec.volaPct / 20, 0.4, 1.2); 
-  let limitEntry = direction === "LONG" ? rec.last * (1 - pullbackPct/100) : rec.last * (1 + pullbackPct/100);
+  // --- SCORING MODULE (0-100) ---
+  let score = 0;
 
-  const riskMult = 2.0; 
-  const riskPct = clamp((rec.volaPct/5)*riskMult, 2.0, 10.0);
-  const sl = direction==="LONG" ? rec.last*(1-riskPct/100) : rec.last*(1+riskPct/100);
-  const tp = direction==="LONG" ? rec.last*(1+(riskPct*3)/100) : rec.last*(1-(riskPct*3)/100);
+  // Module 1 : Volume Spike (Max 35 pts)
+  // 2.5 -> 10pts, 5.0 -> 35pts
+  score += Math.min(35, 10 + (rec.volRatio - 2.5) * 10);
+
+  // Module 2 : Gap VWAP Momentum (Max 20 pts)
+  // Zone idéale : 1.0% à 2.5%
+  if (gapAbs >= 1.0 && gapAbs <= 2.5) score += 20;
+  else if (gapAbs > 2.5 && gapAbs <= 3.5) score += 10;
+  else score += 5;
+
+  // Module 3 : RSI Dynamique (Max 15 pts)
+  // Long ideal: 55-70 | Short ideal: 30-45
+  if (direction === "LONG") {
+    if (rec.rsi5 >= 55 && rec.rsi5 <= 75) score += 15;
+    else if (rec.rsi5 > 50) score += 5;
+  } else {
+    if (rec.rsi5 <= 45 && rec.rsi5 >= 25) score += 15;
+    else if (rec.rsi5 < 50) score += 5;
+  }
+
+  // Module 4 : OB Dominance (Max 15 pts)
+  if (direction === "LONG" && rec.obScore === 1) score += 15;
+  if (direction === "SHORT" && rec.obScore === -1) score += 15;
+
+  // Module 5 : Tendance 24h (Max 10 pts)
+  // On aime le momentum aligné avec la tendance jour
+  if (direction === "LONG" && rec.change24 > 5) score += 10;
+  if (direction === "SHORT" && rec.change24 < -5) score += 10;
+
+  // Module 6 : Contexte BTC (Max 10 pts)
+  if (direction === "LONG" && btcChange > 0) score += 10;
+  if (direction === "SHORT" && btcChange < 0) score += 10;
+
+  // SEUIL TAKE : 82
+  if (score < 82) return null;
+
+  // --- STRATÉGIE SORTIE ---
+  
+  // Entry : Limit Pullback
+  // Plus le mouvement est étendu, plus on demande un pullback profond
+  const pullbackFactor = clamp(gapAbs / 3, 0.5, 1.5); 
+  let limitEntry = direction === "LONG" 
+    ? rec.last * (1 - pullbackFactor/100) 
+    : rec.last * (1 + pullbackFactor/100);
+
+  // TP/SL basés sur la volatilité 24h
+  // Lowcap = SL large nécessaire mais TP agressif
+  const slPct = clamp(rec.volaPct / 3, 2.5, 6.0);
+  const tpPct = slPct * 2; // R:R 1:2
+
+  const sl = direction==="LONG" ? rec.last*(1-slPct/100) : rec.last*(1+slPct/100);
+  const tp = direction==="LONG" ? rec.last*(1+tpPct/100) : rec.last*(1-tpPct/100);
+  
+  const levier = slPct > 4.5 ? "2x" : "3x";
   const obRatio = rec.asksVol > 0 ? (rec.bidsVol / rec.asksVol).toFixed(2) : "N/A";
 
+  // Raison principale pour le log
+  let mainReason = "Momentum";
+  if (rec.volRatio > 4) mainReason = "Volume Nuke";
+  else if (gapAbs > 2) mainReason = "VWAP Breakout";
+  else if (Math.abs(rec.change24) > 10) mainReason = "Trend Continuation";
+
   return { 
-    symbol:rec.symbol, direction, score, reason, 
+    symbol:rec.symbol, direction, score: Math.floor(score), reason: mainReason,
     price:rec.last, 
     limitEntry: num(limitEntry, rec.last<1?5:3),
     sl:num(sl, rec.last<1?5:3), 
     tp:num(tp, rec.last<1?5:3), 
-    riskPct:num(riskPct,2), volRatio:num(rec.volRatio,1), vola:num(rec.volaPct,1), obRatio 
+    riskPct:num(slPct,2), volRatio:num(rec.volRatio,1), vola:num(rec.volaPct,1), obRatio, levier
   };
 }
 
@@ -177,7 +261,7 @@ async function scanDegen(){
   const btcChange = await getBTCTrend();
   
   if (btcChange == null || isNaN(btcChange)) {
-    console.error("⚠️ BTC DATA ERROR après retry : Scan Degen temporairement annulé.");
+    console.error("⚠️ BTC DATA ERROR : Scan Degen annulé.");
     return;
   }
 
@@ -185,8 +269,7 @@ async function scanDegen(){
     DEGEN_SYMBOLS = await updateDegenList(); lastSymbolUpdate = now;
   }
   
-  // Log de suivi Calm Mode
-  console.log(`🎰 DEGEN v0.10 | BTC: ${btcChange.toFixed(2)}% | Last Global Trade: ${Math.floor((now - lastGlobalTradeTime)/60000)}m ago`);
+  console.log(`🎯 DEGEN v1.0 | BTC: ${btcChange.toFixed(2)}% | Symbols: ${DEGEN_SYMBOLS.length} | Cooldown: ${Math.max(0, Math.floor((GLOBAL_COOLDOWN_MS - (now - lastGlobalTradeTime))/1000))}s`);
   
   const BATCH_SIZE = 5; const candidates = [];
   for(let i=0; i<DEGEN_SYMBOLS.length; i+=BATCH_SIZE){
@@ -196,38 +279,34 @@ async function scanDegen(){
     await sleep(400); 
   }
   
-  // 🔥 SINGLE-SHOT : Max 1 trade (le meilleur)
+  // SINGLE SHOT : Le meilleur sinon rien
   const best = candidates.sort((a,b) => b.score - a.score).slice(0, 1);
   
   for(const c of best){
-    // 🔥 GLOBAL COOLDOWN CHECK (15 mins)
+    // GLOBAL COOLDOWN
     const timeSinceLast = now - lastGlobalTradeTime;
     if (timeSinceLast < GLOBAL_COOLDOWN_MS) {
-      console.log(`⏳ DEGEN Signal ${c.symbol} IGNORÉ : Cooldown Global actif (${Math.floor(timeSinceLast/60000)}/${GLOBAL_COOLDOWN_MS/60000} min).`);
+      console.log(`⏳ DEGEN Sniper: Signal ${c.symbol} (Score ${c.score}) ignoré par Cooldown.`);
       continue;
     }
 
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
     
-    const emoji = c.direction === "LONG" ? "💎" : "💣";
-    let footer = "_Zone DEGEN (Calmed)_";
-    if (c.volRatio >= 4.0) footer = "🔥 MEGA PUMP (x4) : ALERTE MAXIMALE !";
-    
-    const levierConseille = c.riskPct > 5 ? "2x" : "3x";
+    const emoji = c.direction === "LONG" ? "🔫 🟢" : "🔫 🔴";
+    const riskEmoji = c.volRatio > 4 ? "☢️" : "⚡";
 
-    const msg = `🎰 *JTF DEGEN v0.10 (Calm Mode)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    const msg = `🎯 *JTF DEGEN v1.0 (Sniper)* ${riskEmoji}\n\n${emoji} *${c.symbol}* — ${c.direction}\n🏅 *Score:* ${c.score}/100\n🔎 *Setup:* ${c.reason}\n\n📉 *Limit Entry:* ${c.limitEntry}\n🔹 Market: ${c.price}\n\n🎯 TP: ${c.tp}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n\n⚖️ *Levier:* ${c.levier} (Isolated)\n📊 *Vol:* x${c.volRatio} | *OB:* ${c.obRatio}\n\n_Wait for limit. No FOMO._`;
     
     await sendTelegram(msg); 
-    console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
+    console.log(`✅ SNIPER SHOT: ${c.symbol} (Score ${c.score})`);
     
-    // 🔥 ACTIVE LE COOLDOWN
     lastGlobalTradeTime = now;
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.10 (Calm Mode) démarré.");
-  await sendTelegram("🎰 *JTF DEGEN v0.10 (Calm Mode) activé.*");
+  console.log("🔫 JTF DEGEN v1.0 (Sniper Momentum) démarré.");
+  await sendTelegram("🔫 *JTF DEGEN v1.0 (Sniper Logic) activé.*");
   while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Crash:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
