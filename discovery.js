@@ -1,6 +1,6 @@
-// discovery.js — JTF DISCOVERY v0.3 (Turbo Mode 5m)
-// Réactivité augmentée : Analyse sur 5 minutes pour éviter d'acheter le top.
-// Filtres anti-FOMO ajoutés (RSI Max & Ecart VWAP).
+// discovery.js — JTF DISCOVERY v0.4 (Volume + Order Book Pressure)
+// Stratégie : Momentum 5m + Validation par le Carnet d'Ordres (Bid/Ask Ratio).
+// Objectif : Éviter d'acheter des "fake pumps" sans pression acheteuse réelle.
 
 import fetch from "node-fetch";
 
@@ -9,13 +9,9 @@ import fetch from "node-fetch";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-// Scan toutes les 5 minutes (Synchro avec la bougie)
 const SCAN_INTERVAL_MS   = 5 * 60_000;
-
-// Anti-spam par paire (15 min pour éviter de spammer le même pump)
 const MIN_ALERT_DELAY_MS = 15 * 60_000;
 
-// Mise à jour liste toutes les heures
 let DISCOVERY_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
@@ -69,7 +65,7 @@ async function updateDiscoveryList() {
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
     const midCaps = valid.slice(0, 50).map(t => t.symbol);
 
-    console.log(`🔄 Discovery v0.3 List : ${midCaps.length} paires (Top: ${midCaps[0]})`);
+    console.log(`🔄 Discovery v0.4 List : ${midCaps.length} paires (Top: ${midCaps[0]})`);
     return midCaps.length > 5 ? midCaps : FALLBACK_MIDCAPS;
 
   } catch (e) {
@@ -78,7 +74,7 @@ async function updateDiscoveryList() {
   }
 }
 
-// ========= API DATA =========
+// ========= API DATA COMPLETE (Ticker + Candles + Depth) =========
 
 async function getTicker(symbol){
   const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`);
@@ -95,6 +91,12 @@ async function getCandles(symbol, seconds, limit=100){
 async function getFunding(symbol){
   const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/currentFundRate?symbol=${symbol}`);
   return j?.data ?? null;
+}
+// NOUVEAU : Récupération du carnet d'ordres
+async function getDepth(symbol){
+  const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/depth?symbol=${symbol}&limit=20`);
+  if(j?.data?.bids && j?.data?.asks) return j.data;
+  return null;
 }
 
 // ========= INDICATEURS =========
@@ -116,14 +118,18 @@ function vwap(c){
   return v?pv/v:null;
 }
 
-// ========= ANALYSE TECHNIQUE (5 min) =========
+// ========= ANALYSE TECHNIQUE =========
 
 async function processDiscovery(symbol) {
-  const [tk, fr] = await Promise.all([getTicker(symbol), getFunding(symbol)]);
+  // On ajoute getDepth dans les appels
+  const [tk, fr, depth] = await Promise.all([
+    getTicker(symbol), 
+    getFunding(symbol),
+    getDepth(symbol)
+  ]);
   if(!tk) return null;
 
   const last = +tk.last;
-  // MODIF v0.3 : On prend 5m (300s) et 15m (900s) au lieu de 15m/1h
   const [c5m, c15m] = await Promise.all([getCandles(symbol, 300, 100), getCandles(symbol, 900, 100)]);
   if(c5m.length < 50 || c15m.length < 50) return null;
 
@@ -132,12 +138,9 @@ async function processDiscovery(symbol) {
   
   const rsi5  = rsi(closes5, 14); 
   const rsi15 = rsi(closes15, 14);
-  
-  // VWAP très court terme (sur les 2 dernières heures en 5m)
   const vwap5 = vwap(c5m.slice(-24));
   const priceVsVwap = vwap5 ? ((last - vwap5)/vwap5)*100 : 0;
 
-  // Volume Spike sur le 5 minutes
   const lastVol = c5m[c5m.length-1].v;
   const avgVol  = c5m.slice(-11, -1).reduce((a,b)=>a+b.v, 0) / 10;
   const volRatio = avgVol > 0 ? lastVol / avgVol : 1;
@@ -146,61 +149,98 @@ async function processDiscovery(symbol) {
   const volaPct = (high24 - low24) / last * 100;
   const change24 = (+tk.priceChangePercent) * 100;
 
-  return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0 };
+  // ANALYSE DU CARNET D'ORDRES (Order Book Imbalance)
+  let obScore = 0; // -1 (Vendeurs) à +1 (Acheteurs)
+  let bidsVol = 0;
+  let asksVol = 0;
+
+  if (depth && depth.bids && depth.asks) {
+    // Somme des volumes sur les 10 premières lignes
+    bidsVol = depth.bids.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
+    asksVol = depth.asks.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
+    
+    // Ratio > 1 = Pression Achat, Ratio < 1 = Pression Vente
+    if (asksVol > 0) {
+      const ratio = bidsVol / asksVol;
+      if (ratio > 1.2) obScore = 1;      // Fort Achat
+      else if (ratio < 0.8) obScore = -1; // Fort Vente
+      else obScore = 0; // Neutre
+    }
+  }
+
+  return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0, obScore, bidsVol, asksVol };
 }
 
-// ========= LOGIQUE SIGNAL (RAPIDE) =========
+// ========= LOGIQUE SIGNAL (Momentum + OrderBook) =========
 
 function analyzeCandidate(rec) {
-  // 1. Filtre Volume et Vola
+  // Filtres de base (Volume, RSI, Vola)
   if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 1.0) return null;
   
-  // 2. Filtre Anti-FOMO (Nouveau v0.3)
-  // Si le RSI 5m est déjà > 82, on est au sommet, trop tard.
+  // Filtres Anti-FOMO
   if (rec.rsi5 > 82) return null; 
-  // Si le RSI 5m est < 18 (pour le short), trop tard.
   if (rec.rsi5 < 18) return null;
-  
-  // Si le prix est parti trop loin du VWAP (> 4% d'écart), c'est une parabolique finie.
   if (Math.abs(rec.priceVsVwap) > 4.0) return null;
 
   let direction = null, score = 0, reason = "";
 
-  // LONG (Sur 5 min)
-  // On cherche le début du pump : RSI entre 55 et 75
+  // --- LOGIQUE LONG ---
+  // On exige maintenant que le Carnet d'Ordres ne soit PAS rouge (obScore >= 0)
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    let s = 50;
-    if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
-    if (rec.rsi5 > 60) s += 10;
-    if (rec.change24 > 3) s += 10; 
-    
-    if (s >= 70) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI 5m Bull`; }
+    if (rec.obScore >= 0) { // Pas de mur de vente devant nous
+        let s = 50;
+        if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
+        if (rec.rsi5 > 60) s += 10;
+        if (rec.change24 > 3) s += 10; 
+        
+        // Bonus si Carnet d'Ordres très acheteur
+        if (rec.obScore === 1) s += 10;
+
+        if (s >= 70) { 
+            direction = "LONG"; 
+            score = s; 
+            reason = `Vol x${rec.volRatio.toFixed(1)} | OrderBook Bullish`; 
+        }
+    }
   }
   
-  // SHORT
+  // --- LOGIQUE SHORT ---
   else if (rec.priceVsVwap < -0.3 && rec.rsi15 < 50 && rec.rsi5 < 45 && rec.rsi5 > 20) {
-    let s = 50;
-    if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
-    if (rec.rsi5 < 40) s += 10;
-    if (rec.change24 < -3) s += 10;
-    
-    if (s >= 70) { direction = "SHORT"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | RSI 5m Bear`; }
+    if (rec.obScore <= 0) { // Pas de mur d'achat qui retient le prix
+        let s = 50;
+        if (rec.volRatio > 2.0) s += 20; else if (rec.volRatio > 1.5) s += 10;
+        if (rec.rsi5 < 40) s += 10;
+        if (rec.change24 < -3) s += 10;
+
+        // Bonus si Carnet d'Ordres très vendeur
+        if (rec.obScore === -1) s += 10;
+        
+        if (s >= 70) { 
+            direction = "SHORT"; 
+            score = s; 
+            reason = `Vol x${rec.volRatio.toFixed(1)} | OrderBook Bearish`; 
+        }
+    }
   }
 
   if (!direction) return null;
 
-  // Stop Loss Dynamique (Adapté au 5m, un peu plus serré)
+  // Money Management
   const riskMult = 1.8; 
   const slDist = (rec.volaPct / 5) * riskMult;
-  const riskPct = clamp(slDist, 1.2, 6.0); // SL Max 6% maintenant
+  const riskPct = clamp(slDist, 1.2, 6.0);
   
   const sl = direction === "LONG" ? rec.last * (1 - riskPct/100) : rec.last * (1 + riskPct/100);
   const tp = direction === "LONG" ? rec.last * (1 + (riskPct * 2.5)/100) : rec.last * (1 - (riskPct * 2.5)/100);
 
+  // Ratio Order Book pour affichage
+  const obRatio = rec.asksVol > 0 ? (rec.bidsVol / rec.asksVol).toFixed(2) : "N/A";
+
   return { 
     symbol: rec.symbol, direction, score, reason, 
     price: rec.last, sl: num(sl, rec.last<1?5:3), tp: num(tp, rec.last<1?5:3), 
-    riskPct: num(riskPct, 2), volRatio: num(rec.volRatio, 1), vola: num(rec.volaPct, 1) 
+    riskPct: num(riskPct, 2), volRatio: num(rec.volRatio, 1), vola: num(rec.volaPct, 1),
+    obRatio
   };
 }
 
@@ -224,7 +264,7 @@ async function scanDiscovery(){
     DISCOVERY_SYMBOLS = await updateDiscoveryList(); lastSymbolUpdate = now;
   }
   
-  console.log(`🚀 Discovery v0.3 Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
+  console.log(`🚀 Discovery v0.4 Scan sur ${DISCOVERY_SYMBOLS.length} Mid-Caps...`);
   
   const BATCH_SIZE = 5; 
   const candidates = [];
@@ -246,16 +286,22 @@ async function scanDiscovery(){
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
     
     const emoji = c.direction === "LONG" ? "🚀" : "🪂";
-    const msg = `⚡ *JTF DISCOVERY v0.3 (Fast 5m)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n🌪️ Vola: ${c.vola}%\n📢 Volume: x${c.volRatio}\n\n_Mode Rapide : Entrée immédiate conseillée_`;
+    
+    let footer = "_Mode Rapide (5m)_";
+    if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Entrée immédiate !";
+    else if (c.volRatio >= 1.5) footer = "⚡ Dynamique forte : Soyez rapide";
+    else footer = "⚠️ Volume modéré : Prudence (Petite mise)";
+
+    const msg = `⚡ *JTF DISCOVERY v0.4 (Vol + OrderBook)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *Order Book Ratio:* ${c.obRatio}\n_(>1.2 = Acheteurs dominent)_\n📢 Volume: x${c.volRatio}\n\n${footer}`;
     
     await sendTelegram(msg); 
-    console.log(`✅ Signal Rapide envoyé: ${c.symbol}`);
+    console.log(`✅ Signal v0.4 envoyé: ${c.symbol}`);
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.3 (Turbo) démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY v0.3 (Mode Rapide 5m) activé.*");
+  console.log("🔥 JTF DISCOVERY v0.4 (OB) démarré.");
+  await sendTelegram("🔥 *JTF DISCOVERY v0.4 (avec Carnet d'Ordres) activé.*");
   while(true){ 
     try { await scanDiscovery(); } 
     catch(e) { console.error("Discovery Loop Error:", e.message); } 
