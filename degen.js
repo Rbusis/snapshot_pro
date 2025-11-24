@@ -1,6 +1,6 @@
-// degen.js — JTF DEGEN v0.2 (Sniper Mode)
-// Cible : Rangs #51 à #150 de la liste dynamique (Low-Caps).
-// FILTRES EXTRÊMES : Score >= 80 | Volume >= x2.0 | Order Book Validé
+// degen.js — JTF DEGEN v0.3 (BTC Safe Mode)
+// Cible : Low-Caps (Rangs #51 à #150).
+// FILTRES : Score >= 80 | Volume >= x2.0 | BTC TREND FILTER (Sécurité)
 
 import fetch from "node-fetch";
 
@@ -10,16 +10,17 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS   = 5 * 60_000;
-const MIN_ALERT_DELAY_MS = 15 * 60_000; // 15 min anti-spam
+const MIN_ALERT_DELAY_MS = 15 * 60_000; 
 
 let DEGEN_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// Liste de secours
+// Seuil de sécurité BTC (Si BTC perd -0.3% en 1h, on coupe les Longs Degen)
+const BTC_DUMP_THRESHOLD = -0.3;
+
 const FALLBACK_LOWCAPS = ["MAGICUSDT_UMCBL","GALAUSDT_UMCBL","ONEUSDT_UMCBL","CELOUSDT_UMCBL","KAVAUSDT_UMCBL"];
 
-// On ignore la liste fixe du Bot 1
 const IGNORE_LIST = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -45,7 +46,24 @@ async function safeGetJson(url){
   }catch{ return null; }
 }
 
-// ========= LISTE DYNAMIQUE (LOW CAPS) =========
+// ========= 1. ANALYSE DU BITCOIN (Le Général) =========
+
+async function getBTCTrend() {
+  try {
+    const url = `https://api.bitget.com/api/mix/v1/market/candles?symbol=BTCUSDT_UMCBL&granularity=3600&limit=5`;
+    const j = await safeGetJson(url);
+    if(!j || !j.data || j.data.length < 2) return null;
+
+    const current = j.data[j.data.length - 1]; 
+    const open = +current[1];
+    const close = +current[4];
+    
+    // Variation en % depuis l'ouverture de l'heure
+    return ((close - open) / open) * 100;
+  } catch (e) { return null; }
+}
+
+// ========= LISTE DYNAMIQUE =========
 
 async function updateDegenList() {
   try {
@@ -53,7 +71,6 @@ async function updateDegenList() {
     const j = await safeGetJson(url);
     if (!j || !j.data) return FALLBACK_LOWCAPS;
 
-    // 1. Filtre de base (USDT, pas Bot 1, Volume > 1M$ minimum pour éviter les scams totaux)
     const valid = j.data.filter(t => 
       t.symbol.endsWith("_UMCBL") && 
       !t.symbol.startsWith("USDC") &&
@@ -61,19 +78,13 @@ async function updateDegenList() {
       !IGNORE_LIST.includes(t.symbol)
     );
 
-    // 2. Tri par volume
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
-
-    // 3. SELECTION : On saute les 50 premiers (Discovery) et on prend les 100 suivants (Low Caps)
     const lowCaps = valid.slice(50, 150).map(t => t.symbol);
 
-    console.log(`🔄 DEGEN List (Sniper): ${lowCaps.length} paires (De ${lowCaps[0]} à la fin)`);
+    console.log(`🔄 DEGEN List (BTC Safe): ${lowCaps.length} paires.`);
     return lowCaps.length > 5 ? lowCaps : FALLBACK_LOWCAPS;
 
-  } catch (e) {
-    console.error("❌ Erreur Update Degen List:", e.message);
-    return FALLBACK_LOWCAPS;
-  }
+  } catch (e) { return FALLBACK_LOWCAPS; }
 }
 
 // ========= API DATA =========
@@ -134,7 +145,6 @@ async function processDegen(symbol) {
   const volaPct=(high24 - low24)/last*100;
   const change24=(+tk.priceChangePercent)*100;
 
-  // Order Book
   let obScore = 0; let bidsVol=0; let asksVol=0;
   if (depth && depth.bids && depth.asks) {
     bidsVol = depth.bids.slice(0, 10).reduce((acc, x) => acc + (+x[1]), 0);
@@ -148,12 +158,11 @@ async function processDegen(symbol) {
   return { symbol, last, volaPct, rsi5, rsi15, priceVsVwap, volRatio, change24, funding: fr ? +fr.fundingRate * 100 : 0, obScore, bidsVol, asksVol };
 }
 
-// ========= LOGIQUE SIGNAL DEGEN (SNIPER) =========
-function analyzeCandidate(rec) {
-  // FILTRE 1 : VOLRATIO >= 2.0 (On veut du x2 minimum)
+// ========= LOGIQUE SIGNAL DEGEN (FILTRE BTC) =========
+function analyzeCandidate(rec, btcChange) {
+  // 1. FILTRE : VOLRATIO >= 2.0 (Sniper)
   if(!rec || !rec.rsi5 || !rec.rsi15 || rec.volaPct < 3 || rec.volRatio < 2.0) return null;
   
-  // Anti-FOMO
   if (rec.rsi5 > 82) return null; 
   if (rec.rsi5 < 18) return null;
   if (Math.abs(rec.priceVsVwap) > 5.0) return null; 
@@ -162,15 +171,20 @@ function analyzeCandidate(rec) {
 
   // LONG
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
+    
+    // 🛑 SECURITE BTC 🛑
+    // Si BTC est baissier, on annule tout LONG sur les Degen
+    if (btcChange != null && btcChange < BTC_DUMP_THRESHOLD) return null;
+
     if (rec.obScore >= 0) {
         let s = 50;
-        if (rec.volRatio > 3.0) s += 20; else if (rec.volRatio > 2.0) s += 10; // Bonus pour x3
+        if (rec.volRatio > 3.0) s += 20; else if (rec.volRatio > 2.0) s += 10; 
         if (rec.rsi5 > 60) s += 10;
         if (rec.change24 > 3) s += 10; 
         if (rec.obScore === 1) s += 10;
 
-        // FILTRE 2 : SCORE >= 80
-        if (s >= 80) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bull`; }
+        // FILTRE : SCORE >= 80
+        if (s >= 80) { direction = "LONG"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bull | BTC OK`; }
     }
   }
   // SHORT
@@ -182,7 +196,7 @@ function analyzeCandidate(rec) {
         if (rec.change24 < -3) s += 10;
         if (rec.obScore === -1) s += 10;
 
-        // FILTRE 2 : SCORE >= 80
+        // FILTRE : SCORE >= 80
         if (s >= 80) { direction = "SHORT"; score = s; reason = `Vol x${rec.volRatio.toFixed(1)} | OB Bear`; }
     }
   }
@@ -192,7 +206,7 @@ function analyzeCandidate(rec) {
   // Money Management DEGEN
   const riskMult = 2.0; 
   const slDist = (rec.volaPct / 5) * riskMult;
-  const riskPct = clamp(slDist, 2.0, 10.0); // SL Max 10%
+  const riskPct = clamp(slDist, 2.0, 10.0); 
   
   const sl = direction === "LONG" ? rec.last * (1 - riskPct/100) : rec.last * (1 + riskPct/100);
   const tp = direction === "LONG" ? rec.last * (1 + (riskPct * 3)/100) : rec.last * (1 - (riskPct * 3)/100);
@@ -215,10 +229,19 @@ function checkAntiSpam(symbol, direction){
 // ========= MOTEUR PRINCIPAL =========
 async function scanDegen(){
   const now = Date.now();
+  
+  // 1. CHECK BTC
+  const btcChange = await getBTCTrend();
+  const btcSafe = btcChange == null || btcChange > BTC_DUMP_THRESHOLD;
+  if(!btcSafe) {
+    console.log(`⚠️ BTC Degen Pause (${btcChange?.toFixed(2)}%)`);
+    // On continue quand même le scan pour les SHORTS éventuels, le filtrage LONG se fait dans analyzeCandidate
+  }
+
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DEGEN_SYMBOLS.length === 0){
     DEGEN_SYMBOLS = await updateDegenList(); lastSymbolUpdate = now;
   }
-  console.log(`🎰 DEGEN Scan sur ${DEGEN_SYMBOLS.length} Low-Caps...`);
+  console.log(`🎰 DEGEN Scan (${DEGEN_SYMBOLS.length} paires) | BTC: ${btcChange?.toFixed(2)}%`);
   
   const BATCH_SIZE = 5; 
   const candidates = [];
@@ -226,7 +249,10 @@ async function scanDegen(){
   for(let i=0; i<DEGEN_SYMBOLS.length; i+=BATCH_SIZE){
     const batch = DEGEN_SYMBOLS.slice(i, i+BATCH_SIZE);
     const results = await Promise.all(batch.map(s => processDegen(s).catch(e=>null)));
-    for(const r of results){ const signal = analyzeCandidate(r); if(signal) candidates.push(signal); }
+    for(const r of results){ 
+      const signal = analyzeCandidate(r, btcChange); 
+      if(signal) candidates.push(signal); 
+    }
     await sleep(400); 
   }
   
@@ -240,7 +266,7 @@ async function scanDegen(){
     if (c.volRatio >= 4.0) footer = "🔥 MEGA PUMP (x4) : ALERTE MAXIMALE !";
     else if (c.volRatio >= 3.0) footer = "⚡ Volatilité extrême (x3)";
 
-    const msg = `🎰 *JTF DEGEN (Low-Caps)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    const msg = `🎰 *JTF DEGEN v0.3 (BTC Safe)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n🔹 Entry: ${c.price}\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
@@ -248,8 +274,8 @@ async function scanDegen(){
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.2 démarré.");
-  await sendTelegram("🎰 *JTF DEGEN (Sniper Mode 80+) activé.*");
+  console.log("🔥 JTF DEGEN v0.3 (BTC Safe) démarré.");
+  await sendTelegram("🎰 *JTF DEGEN v0.3 (Filtre BTC) activé.*");
   while(true){ try { await scanDegen(); } catch(e) { console.error("Degen Loop Error:", e.message); } await sleep(SCAN_INTERVAL_MS); }
 }
 
