@@ -1,8 +1,10 @@
-// degen.js — JTF DEGEN v0.4 (Smart Entry)
-// Avec calcul automatique du prix Limit pour éviter le FOMO.
+// degen.js — JTF DEGEN v0.5 (Smart Entry + Levier)
+// Cible : Low-Caps (Rangs #51 à #150).
+// Avec calcul prix Limit et Levier conseillé.
 
 import fetch from "node-fetch";
 
+// ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS   = 5 * 60_000;
@@ -104,7 +106,7 @@ function analyzeCandidate(rec, btcChange) {
 
   if (!direction) return null;
 
-  // --- SMART ENTRY (Calcul du prix Limit) ---
+  // --- SMART ENTRY ---
   const pullbackPct = clamp(rec.volaPct / 20, 0.4, 1.2); 
   let limitEntry;
   if (direction === "LONG") {
@@ -112,7 +114,6 @@ function analyzeCandidate(rec, btcChange) {
   } else {
     limitEntry = rec.last * (1 + pullbackPct/100);
   }
-  // -----------------------------------------
 
   const riskMult = 2.0; 
   const riskPct = clamp((rec.volaPct/5)*riskMult, 2.0, 10.0);
@@ -123,7 +124,7 @@ function analyzeCandidate(rec, btcChange) {
   return { 
     symbol:rec.symbol, direction, score, reason, 
     price:rec.last, 
-    limitEntry: num(limitEntry, rec.last<1?5:3), 
+    limitEntry: num(limitEntry, rec.last<1?5:3),
     sl:num(sl, rec.last<1?5:3), 
     tp:num(tp, rec.last<1?5:3), 
     riskPct:num(riskPct,2), volRatio:num(rec.volRatio,1), vola:num(rec.volaPct,1), obRatio 
@@ -160,18 +161,22 @@ async function scanDegen(){
   for(const c of best){
     if(!checkAntiSpam(c.symbol, c.direction)) continue;
     const emoji = c.direction === "LONG" ? "💎" : "💣";
-    let footer = "_Zone DEGEN (Limit Order Conseillé)_";
+    let footer = "_Zone DEGEN (Risque Élevé)_";
     if (c.volRatio >= 4.0) footer = "🔥 MEGA PUMP (x4) : ALERTE MAXIMALE !";
 
-    const msg = `🎰 *JTF DEGEN v0.4 (Smart Entry)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    // Calcul du levier conseillé (Degen = souvent volatil donc levier faible)
+    const levierConseille = c.riskPct > 5 ? "2x" : "3x";
+
+    const msg = `🎰 *JTF DEGEN v0.5 (Smart Entry)* 🎰\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}\n_Mise minimum conseillée_`;
+    
     await sendTelegram(msg); 
     console.log(`✅ Signal DEGEN envoyé: ${c.symbol}`);
   }
 }
 
 async function main(){
-  console.log("🔥 JTF DEGEN v0.4 démarré.");
-  await sendTelegram("🎰 *JTF DEGEN v0.4 (Smart Entry) activé.*");
+  console.log("🔥 JTF DEGEN v0.5 démarré.");
+  await sendTelegram("🎰 *JTF DEGEN v0.5 (Smart Entry) activé.*");
   while(true){ try { await scanDegen(); } catch(e) {} await sleep(SCAN_INTERVAL_MS); }
 }
 
