@@ -2,6 +2,7 @@
 // ARCHITECTURE : Robust BTC Retry + Single-Shot + Global Cooldown (30m)
 // LOGIQUE : Midcap Scoring (Vol > 1.8, No Wicks, Clean VWAP Gap)
 
+import fs from "fs";
 import fetch from "node-fetch";
 
 // ========= CONFIG =========
@@ -69,12 +70,31 @@ async function updateDiscoveryList() {
   try {
     const j = await safeGetJson("https://api.bitget.com/api/mix/v1/market/tickers?productType=umcbl");
     if (!j?.data) return FALLBACK_MIDCAPS;
-    // Filtre : Midcaps (>5M vol) mais pas Top 30
-    const valid = j.data.filter(t => t.symbol.endsWith("_UMCBL") && !t.symbol.startsWith("USDC") && (+t.usdtVolume > 5000000) && !IGNORE_LIST.includes(t.symbol));
+
+    const valid = j.data.filter(t => 
+      t.symbol.endsWith("_UMCBL") &&
+      !t.symbol.startsWith("USDC") &&
+      (+t.usdtVolume > 5000000) &&
+      !IGNORE_LIST.includes(t.symbol)
+    );
+
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
+
     const midCaps = valid.slice(0, 50).map(t => t.symbol);
+
+    // 🔥 NOUVEAU : écriture dans discovery_list.json
+    try {
+      fs.writeFileSync("./config/discovery_list.json", JSON.stringify(midCaps, null, 2));
+      console.log(`📝 Discovery : liste midcaps écrite (${midCaps.length} paires).`);
+    } catch (e) {
+      console.error("❌ Impossible d'écrire discovery_list.json:", e);
+    }
+
     return midCaps.length > 5 ? midCaps : FALLBACK_MIDCAPS;
-  } catch { return FALLBACK_MIDCAPS; }
+
+  } catch {
+    return FALLBACK_MIDCAPS;
+  }
 }
 
 async function getTicker(symbol){ const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/ticker?symbol=${symbol}`); return j?.data ?? null; }
