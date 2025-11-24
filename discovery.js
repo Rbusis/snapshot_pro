@@ -1,5 +1,5 @@
-// discovery.js — JTF DISCOVERY v0.10 (Engine Fix)
-// Utilise le moteur de data de autoselect.js pour garantir la lecture du BTC.
+// discovery.js — JTF DISCOVERY v0.11 (Robust BTC Fix)
+// Utilise une boucle de tentative (Retry) pour ne pas planter sur une erreur réseau.
 
 import fetch from "node-fetch";
 
@@ -28,17 +28,16 @@ async function safeGetJson(url){
   try{ const r = await fetch(url,{ headers:{ Accept:"application/json" } }); return r.ok ? await r.json() : null; }catch{ return null; }
 }
 
-// ========= API BITGET (MOTEUR ROBUSTE AUTOSELECT) =========
+// ========= API BITGET (MOTEUR ROBUSTE) =========
 
 async function getCandles(symbol, seconds, limit=100){
   const base = baseSymbol(symbol);
-  // Essai V2 (Comme Autoselect)
+  // Essai V2
   let j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`);
   if(j?.data?.length){
-    // Format [t, o, h, l, c, v] -> on convertit en objets clairs
     return j.data.map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] })).sort((a,b)=>a.t-b.t);
   }
-  // Fallback V1 si V2 échoue
+  // Fallback V1
   j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}`);
   if(j?.data?.length){
     return j.data.map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] })).sort((a,b)=>a.t-b.t);
@@ -46,18 +45,31 @@ async function getCandles(symbol, seconds, limit=100){
   return [];
 }
 
+// 🔥 LA CORRECTION EST ICI : ON INSISTE SI ÇA ECHOUE 🔥
 async function getBTCTrend() {
-  // On utilise la fonction getCandles robuste
-  const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5); // 3600s = 1h
-  if (!candles || candles.length < 2) return null;
-
-  // On prend la dernière bougie disponible
-  const current = candles[candles.length - 1];
-  const open = current.o;
-  const close = current.c;
+  const MAX_RETRIES = 3; // On essaie 3 fois
   
-  if (!open) return 0;
-  return ((close - open) / open) * 100;
+  for(let i = 0; i < MAX_RETRIES; i++) {
+    const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5); // 3600s = 1h
+    
+    if (candles && candles.length >= 2) {
+      // Succès !
+      const current = candles[candles.length - 1];
+      const open = current.o;
+      const close = current.c;
+      if (!open) return 0;
+      return ((close - open) / open) * 100;
+    }
+    
+    // Si échec, on attend un peu avant de réessayer (sauf à la dernière tentative)
+    if (i < MAX_RETRIES - 1) {
+      console.log(`⚠️ Echec lecture BTC (Tentative ${i+1}/${MAX_RETRIES})... On réessaie dans 2s.`);
+      await sleep(2000); 
+    }
+  }
+
+  // Si on arrive ici, c'est que les 3 tentatives ont échoué
+  return null;
 }
 
 async function updateDiscoveryList() {
@@ -67,7 +79,6 @@ async function updateDiscoveryList() {
     const valid = j.data.filter(t => t.symbol.endsWith("_UMCBL") && !t.symbol.startsWith("USDC") && (+t.usdtVolume > 5000000) && !IGNORE_LIST.includes(t.symbol));
     valid.sort((a,b) => (+b.usdtVolume) - (+a.usdtVolume));
     const midCaps = valid.slice(0, 50).map(t => t.symbol);
-    console.log(`🔄 Discovery List: ${midCaps.length} paires.`);
     return midCaps.length > 5 ? midCaps : FALLBACK_MIDCAPS;
   } catch { return FALLBACK_MIDCAPS; }
 }
@@ -88,7 +99,6 @@ async function processDiscovery(symbol) {
   if(!tk) return null;
   const last=+tk.last; 
   
-  // On utilise la fonction getCandles robuste ici aussi
   const [c5m, c15m] = await Promise.all([getCandles(symbol, 300, 100), getCandles(symbol, 900, 100)]);
   if(c5m.length < 50) return null;
 
@@ -118,7 +128,6 @@ function analyzeCandidate(rec, btcChange) {
   let direction=null, score=0, reason="";
 
   if (rec.priceVsVwap > 0.3 && rec.rsi15 > 50 && rec.rsi5 > 55 && rec.rsi5 < 80) {
-    // Check BTC via la valeur passée (sécurisée en amont)
     if (btcChange == null || btcChange < BTC_DUMP_THRESHOLD) return null;
 
     if (rec.obScore >= 0) {
@@ -168,19 +177,21 @@ function checkAntiSpam(symbol, direction){
 
 async function scanDiscovery(){
   const now = Date.now();
-  // 1. Récupération BTC via la méthode robuste
+  // Utilisation de la nouvelle fonction robuste
   const btcChange = await getBTCTrend();
   
-  // Sécurité Paranoïaque
   if (btcChange == null || isNaN(btcChange)) {
-    console.error("⚠️ BTC DATA ERROR: Scan Discovery temporairement annulé.");
+    console.error("⚠️ BTC DATA ERROR après 3 tentatives: Scan Discovery ignoré cette fois.");
     return; 
   }
 
   if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || DISCOVERY_SYMBOLS.length === 0){
     DISCOVERY_SYMBOLS = await updateDiscoveryList(); lastSymbolUpdate = now;
+    console.log(`🔄 Discovery List: ${DISCOVERY_SYMBOLS.length} paires.`);
   }
-  console.log(`🚀 Discovery Scan | BTC: ${btcChange.toFixed(2)}%`);
+  
+  // Petit log pour confirmer que ça passe
+  console.log(`🚀 Discovery Scan | BTC: ${btcChange.toFixed(2)}% | Symboles: ${DISCOVERY_SYMBOLS.length}`);
   
   const BATCH_SIZE = 5; const candidates = [];
   for(let i=0; i<DISCOVERY_SYMBOLS.length; i+=BATCH_SIZE){
@@ -198,7 +209,7 @@ async function scanDiscovery(){
     if (c.volRatio >= 2.5) footer = "🔥 VOLUME EXPLOSIF : Setup Majeur";
     const levierConseille = c.riskPct > 4 ? "2x" : (c.riskPct > 2.5 ? "3x" : "4x");
 
-    const msg = `⚡ *JTF DISCOVERY v0.10 (Engine Fix)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
+    const msg = `⚡ *JTF DISCOVERY v0.11 (Robust)* ⚡\n\n${emoji} *${c.symbol}* — ${c.direction}\n📊 Score: ${c.score}/100\n💡 Raison: _${c.reason}_\n\n📉 *Limit Entry:* ${c.limitEntry} (Recommandé)\n🔹 Market: ${c.price}\n\n🛑 SL: ${c.sl} (-${c.riskPct}%)\n🎯 TP: ${c.tp}\n\n📏 *Levier:* ${levierConseille}\n⚖️ *OB Ratio:* ${c.obRatio}\n📢 Volume: x${c.volRatio}\n\n${footer}`;
     
     await sendTelegram(msg); 
     console.log(`✅ Signal Discovery envoyé: ${c.symbol}`);
@@ -206,8 +217,8 @@ async function scanDiscovery(){
 }
 
 async function main(){
-  console.log("🔥 JTF DISCOVERY v0.10 démarré.");
-  await sendTelegram("🔥 *JTF DISCOVERY v0.10 (Moteur BTC Robuste) activé.*");
+  console.log("🔥 JTF DISCOVERY v0.11 démarré (Fix BTC).");
+  await sendTelegram("🔥 *JTF DISCOVERY v0.11 (Robust BTC) activé.*");
   while(true){ try { await scanDiscovery(); } catch(e) { console.error("Discovery Crash:", e); } await sleep(SCAN_INTERVAL_MS); }
 }
 
