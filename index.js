@@ -5,7 +5,7 @@ import http from “http”;
 import { startAutoselect } from “./autoselect.js”;
 import { startDiscovery } from “./discovery.js”;
 import { startDegen } from “./degen.js”;
-import { startSwing } from “./swing.js”; // <— NOUVEAU
+import { startSwing } from “./swing.js”;
 
 // ========= RAILWAY KEEPALIVE =========
 const PORT = process.env.PORT || 8080;
@@ -29,5 +29,5 @@ startDiscovery().catch(e => console.error(“❌ CRASH Discovery:”, e));
 // 3. Bot Low-Caps (Degen)
 startDegen().catch(e => console.error(“❌ CRASH Degen:”, e));
 
-// 4. Bot Swing Trading (Swing) - NOUVEAU
+// 4. Bot Swing Trading (Swing)
 startSwing().catch(e => console.error(“❌ CRASH Swing:”, e));
