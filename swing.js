@@ -1,13 +1,15 @@
 // swing.js — JTF SWING BOT v1.0
 // Swing Trading basé sur cycles 1h-4h
 // Très peu de signaux. Très forte robustesse.
+// JDS-SWING (0–100) basé sur : ΔP 15m/1h/4h, EMA20/50, VWAP 1h/4h, RSI 15m/1h/4h, ATR/vola24, PosDay/Tend24, ΔOI + OB.
 
+// ========= IMPORTS =========
 import fetch from "node-fetch";
 
 // ========= CONFIG =========
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 // Scan toutes les 30 minutes EXACT
 const SCAN_INTERVAL_MS = 30 * 60_000;
@@ -28,18 +30,18 @@ const JDS_THRESHOLD_READY = 75;
 const JDS_THRESHOLD_PRIME = 85;
 
 // Conditions de marché à éviter
-const MAX_ATR_1H_PCT = 1.8;
-const MAX_VOLA_24 = 25;
-const MAX_VWAP_4H_DEVIATION = 4;
+const MAX_ATR_1H_PCT          = 1.8;
+const MAX_VOLA_24             = 25;
+const MAX_VWAP_4H_DEVIATION   = 4;
 
 // ========= MÉMOIRE =========
-const prevOI = new Map();
+const prevOI     = new Map();
 const lastAlerts = new Map();
 
 // ========= UTILS =========
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-const num = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
-const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
+const sleep  = (ms) => new Promise(res => setTimeout(res, ms));
+const num    = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
+const clamp  = (x, min, max) => Math.max(min, Math.min(max, x));
 const baseSymbol = s => s.replace("_UMCBL", "");
 
 async function safeGetJson(url) {
@@ -47,16 +49,22 @@ async function safeGetJson(url) {
     const r = await fetch(url, { headers: { Accept: "application/json" } });
     if (!r.ok) return null;
     return await r.json();
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 // ========= API BITGET =========
 
 async function getCandles(symbol, seconds, limit = 400) {
   const base = baseSymbol(symbol);
-  let j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`);
+  let j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`
+  );
   if (j?.data?.length) {
-    return j.data.map(c => ({ t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5] })).sort((a, b) => a.t - b.t);
+    return j.data
+      .map(c => ({ t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5] }))
+      .sort((a, b) => a.t - b.t);
   }
   return [];
 }
@@ -69,7 +77,10 @@ async function getTicker(symbol) {
 async function getDepth(symbol) {
   const j = await safeGetJson(`https://api.bitget.com/api/mix/v1/market/depth?symbol=${symbol}&limit=5`);
   if (j?.data?.bids && j.data.asks) {
-    return { bids: j.data.bids.map(x => [+x[0], +x[1]]), asks: j.data.asks.map(x => [+x[0], +x[1]]) };
+    return {
+      bids: j.data.bids.map(x => [+x[0], +x[1]]),
+      asks: j.data.asks.map(x => [+x[0], +x[1]])
+    };
   }
   return { bids: [], asks: [] };
 }
@@ -81,7 +92,9 @@ async function getOI(symbol) {
 
 // ========= INDICATEURS =========
 
-function percent(a, b) { return b ? (a / b - 1) * 100 : null; }
+function percent(a, b) {
+  return b ? (a / b - 1) * 100 : null;
+}
 
 function atr(candles, period = 14) {
   if (candles.length < period + 1) return null;
@@ -100,23 +113,38 @@ function atr(candles, period = 14) {
 function rsi(closes, p = 14) {
   if (closes.length < p + 1) return null;
   let g = 0, l = 0;
-  for (let i = 1; i <= p; i++) { const d = closes[i] - closes[i - 1]; if (d >= 0) g += d; else l -= d; }
+  for (let i = 1; i <= p; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) g += d; else l -= d;
+  }
   g /= p; l = (l / p) || 1e-9;
-  let rs = g / l; let val = 100 - 100 / (1 + rs);
+  let rs = g / l;
+  let val = 100 - 100 / (1 + rs);
   for (let i = p + 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1]; const G = Math.max(d, 0), L = Math.max(-d, 0);
-    g = (g * (p - 1) + G) / p; l = ((l * (p - 1) + L) / p) || 1e-9; rs = g / l; val = 100 - 100 / (1 + rs);
+    const d = closes[i] - closes[i - 1];
+    const G = Math.max(d, 0), L = Math.max(-d, 0);
+    g = (g * (p - 1) + G) / p;
+    l = ((l * (p - 1) + L) / p) || 1e-9;
+    rs = g / l;
+    val = 100 - 100 / (1 + rs);
   }
   return val;
 }
 
 function vwap(c) {
-  let pv = 0, v = 0; for (const x of c) { const p = (x.h + x.l + x.c) / 3; pv += p * x.v; v += x.v; }
+  let pv = 0, v = 0;
+  for (const x of c) {
+    const p = (x.h + x.l + x.c) / 3;
+    pv += p * x.v;
+    v += x.v;
+  }
   return v ? pv / v : null;
 }
 
 function positionInDay(last, low, high) {
-  const r = high - low; if (r <= 0 || last == null) return null; return ((last - low) / r) * 100;
+  const r = high - low;
+  if (r <= 0 || last == null) return null;
+  return ((last - low) / r) * 100;
 }
 
 function trendStrength(candles, period = 20) {
@@ -130,84 +158,222 @@ function trendStrength(candles, period = 20) {
   return ((ups - downs) / period) * 100;
 }
 
+function ema(closes, period) {
+  if (closes.length < period + 1) return null;
+  const k = 2 / (period + 1);
+  let emaVal = closes[0];
+  for (let i = 1; i < closes.length; i++) {
+    emaVal = closes[i] * k + emaVal * (1 - k);
+  }
+  return emaVal;
+}
+
+function emaSlope(closes, period) {
+  if (closes.length < period + 2) return null;
+  const k = 2 / (period + 1);
+  let emaPrev = closes[0];
+  for (let i = 1; i < closes.length - 1; i++) {
+    emaPrev = closes[i] * k + emaPrev * (1 - k);
+  }
+  let emaLast = emaPrev * (1 - k) + closes[closes.length - 1] * k;
+  return emaLast - emaPrev;
+}
+
+function priceChangePct(candles, barsBack) {
+  if (!candles || candles.length <= barsBack) return null;
+  const last = candles[candles.length - 1].c;
+  const prev = candles[candles.length - 1 - barsBack].c;
+  if (!prev) return null;
+  return (last / prev - 1) * 100;
+}
+
 // ========= JDS-SWING CALCULATION =========
+// Modules :
+// M1 (0–25) : ΔP_1h & ΔP_4h + EMA20/50 cohérents
+// M2 (0–20) : VWAP 1h/4h direction + distance
+// M3 (0–15) : Structure RSI 15m/1h/4h
+// M4 (0–15) : Volatilité saine (ATR1h + vola24)
+// M5 (0–15) : Structure journalière (PosDay + Tend24)
+// M6 (0–10) : ΔOI + Orderbook (OB)
 
 function calculateJDSSwing(rec, c15m, c1h, c4h) {
   let score = 0;
-
-  // MODULE 1: Macro-Trend 1h/4h (0-20)
-  const trend1h = trendStrength(c1h, 48);
-  const trend4h = trendStrength(c4h, 24);
-  const trendScore = clamp((Math.abs(trend1h) + Math.abs(trend4h)) / 10, 0, 20);
-  score += trendScore;
-
-  // MODULE 2: VWAP-Bias 1h/4h (0-20)
-  const vwap1h = vwap(c1h.slice(-48));
-  const vwap4h = vwap(c4h.slice(-48));
   const last = rec.last;
-  let vwapScore = 0;
-  if (vwap1h && vwap4h && last) {
-    const deltaVWAP1h = Math.abs(percent(last, vwap1h));
-    const deltaVWAP4h = Math.abs(percent(last, vwap4h));
-    if (deltaVWAP1h < 2 && deltaVWAP4h < 2) vwapScore = 20;
-    else if (deltaVWAP1h < 4 && deltaVWAP4h < 4) vwapScore = 12;
-    else vwapScore = 5;
-  }
-  score += vwapScore;
 
-  // MODULE 3: Momentum 15m/1h/4h (0-20)
   const closes15m = c15m.map(x => x.c);
-  const closes1h = c1h.map(x => x.c);
-  const closes4h = c4h.map(x => x.c);
-  const rsi15 = rsi(closes15m, 14);
-  const rsi1h = rsi(closes1h, 14);
-  const rsi4h = rsi(closes4h, 14);
+  const closes1h  = c1h.map(x => x.c);
+  const closes4h  = c4h.map(x => x.c);
 
-  let momentumScore = 0;
-  if (rsi15 && rsi1h && rsi4h) {
-    const rsiAvg = (rsi15 + rsi1h + rsi4h) / 3;
-    if (rsiAvg > 40 && rsiAvg < 60) momentumScore = 20;
-    else if (rsiAvg > 35 && rsiAvg < 65) momentumScore = 12;
-    else momentumScore = 5;
-  }
-  score += momentumScore;
+  // === ΔP multi-frames ===
+  const dP15 = priceChangePct(c15m, 4); // ~1h
+  const dP1h = priceChangePct(c1h, 3);  // ~3h
+  const dP4h = priceChangePct(c4h, 3);  // ~12h
 
-  // MODULE 4: Volatilité saine (ATR + vola24) (0-15)
-  const atr1h = atr(c1h, 14);
-  const atr1hPct = atr1h && last ? (atr1h / last) * 100 : null;
+  // === EMA ===
+  const ema20_1h = ema(closes1h, 20);
+  const ema50_1h = ema(closes1h, 50);
+  const ema20_4h = ema(closes4h, 20);
+  const ema50_4h = ema(closes4h, 50);
+
+  const ema20_1h_slope = emaSlope(closes1h, 20);
+  const ema20_4h_slope = emaSlope(closes4h, 20);
+
+  // === VWAP ===
+  const deltaVWAP1h = rec.deltaVWAP1h;
+  const deltaVWAP4h = rec.deltaVWAP4h;
+
+  // === RSI ===
+  const rsi15 = rec.rsi["15m"];
+  const rsi1h = rec.rsi["1h"];
+  const rsi4h = rec.rsi["4h"];
+
+  // === Volatilité ===
   const vola24 = rec.volaPct;
 
-  let volaScore = 0;
-  if (atr1hPct && vola24) {
-    if (atr1hPct < MAX_ATR_1H_PCT && vola24 < MAX_VOLA_24 && vola24 > 2) volaScore = 15;
-    else if (atr1hPct < 2.5 && vola24 < 30) volaScore = 8;
-    else volaScore = 2;
-  }
-  score += volaScore;
-
-  // MODULE 5: Structure journalière (PosDay + Tend24) (0-15)
+  // === Journalier ===
   const posDay = rec.posDay;
   const tend24 = rec.tend24;
 
-  let structureScore = 0;
+  // === OI & OB ===
+  const deltaOI      = rec.deltaOIpct;
+  const obImbalance  = rec.obImbalance;
+
+  // --- M1 : Cohérence de tendance ΔP + EMA (0–25) ---
+  let m1 = 0;
+  if (dP1h != null && dP4h != null) {
+    const s1 = Math.sign(dP1h);
+    const s4 = Math.sign(dP4h);
+    const a1 = Math.abs(dP1h);
+    const a4 = Math.abs(dP4h);
+
+    if (s1 === 0 || s4 === 0) {
+      m1 = 5;
+    } else if (s1 === s4) {
+      if (a1 >= 0.3 && a1 <= 5 && a4 >= 0.5 && a4 <= 8) {
+        m1 = 18;
+      } else if (a1 <= 7 && a4 <= 12) {
+        m1 = 14;
+      } else {
+        m1 = 8;
+      }
+    } else {
+      m1 = 4;
+    }
+
+    // Bonus EMA alignées
+    if (ema20_1h != null && ema50_1h != null && ema20_4h != null && ema50_4h != null) {
+      const bias1h = Math.sign(ema20_1h - ema50_1h);
+      const bias4h = Math.sign(ema20_4h - ema50_4h);
+      if (bias1h === bias4h && bias1h !== 0) {
+        m1 += 4;
+      }
+    }
+
+    // Bonus si slope EMA 20 non plate
+    if (ema20_1h_slope != null && Math.abs(ema20_1h_slope / last) * 100 > 0.05) m1 += 1;
+    if (ema20_4h_slope != null && Math.abs(ema20_4h_slope / last) * 100 > 0.05) m1 += 1;
+  }
+  m1 = clamp(m1, 0, 25);
+  score += m1;
+
+  // --- M2 : VWAP 1h/4h (0–20) ---
+  let m2 = 0;
+  if (deltaVWAP1h != null && deltaVWAP4h != null) {
+    const s1 = Math.sign(deltaVWAP1h);
+    const s4 = Math.sign(deltaVWAP4h);
+    const a1 = Math.abs(deltaVWAP1h);
+    const a4 = Math.abs(deltaVWAP4h);
+
+    if (s1 === s4 && s1 !== 0) {
+      if (a1 >= 0.2 && a1 <= 2 && a4 >= 0.1 && a4 <= 2.5) {
+        m2 = 18;
+      } else if (a1 <= 3.5 && a4 <= 4) {
+        m2 = 12;
+      } else {
+        m2 = 7;
+      }
+    } else if (s1 === 0 && s4 === 0) {
+      m2 = 8; // price collé à VWAP : neutre
+    } else {
+      m2 = 4; // VWAP 1h vs 4h en désaccord
+    }
+  }
+  m2 = clamp(m2, 0, 20);
+  score += m2;
+
+  // --- M3 : Structure RSI (0–15) ---
+  let m3 = 0;
+  if (rsi15 != null && rsi1h != null && rsi4h != null) {
+    const rsiAvg = (rsi15 + rsi1h + rsi4h) / 3;
+    const allIn3565 =
+      rsi15 > 35 && rsi15 < 65 &&
+      rsi1h > 35 && rsi1h < 65 &&
+      rsi4h > 35 && rsi4h < 65;
+
+    if (rsiAvg > 40 && rsiAvg < 60 && allIn3565) {
+      m3 = 13;
+    } else if (rsiAvg > 35 && rsiAvg < 65) {
+      m3 = 9;
+    } else if (rsiAvg > 30 && rsiAvg < 70) {
+      m3 = 5;
+    } else {
+      m3 = 2;
+    }
+  }
+  m3 = clamp(m3, 0, 15);
+  score += m3;
+
+  // --- M4 : Volatilité saine (ATR 1h + vola24) (0–15) ---
+  let m4 = 0;
+  if (rec.atr1hPct != null && vola24 != null) {
+    const atr1hPct = rec.atr1hPct;
+    if (atr1hPct < MAX_ATR_1H_PCT && vola24 < MAX_VOLA_24 && vola24 > 2) {
+      m4 = 13;
+    } else if (atr1hPct < 2.5 && vola24 < 30) {
+      m4 = 8;
+    } else {
+      m4 = 3;
+    }
+  }
+  m4 = clamp(m4, 0, 15);
+  score += m4;
+
+  // --- M5 : Structure journalière (0–15) ---
+  let m5 = 0;
   if (posDay != null && tend24 != null) {
-    if ((posDay > 30 && posDay < 70) || Math.abs(tend24) > 20) structureScore = 15;
-    else if (Math.abs(tend24) > 10) structureScore = 8;
-    else structureScore = 3;
+    if ((posDay > 30 && posDay < 70) || Math.abs(tend24) > 20) {
+      m5 = 13;
+    } else if (Math.abs(tend24) > 10) {
+      m5 = 8;
+    } else {
+      m5 = 3;
+    }
   }
-  score += structureScore;
+  m5 = clamp(m5, 0, 15);
+  score += m5;
 
-  // MODULE 6: Orderbook + Construction OI (0-10)
-  const deltaOI = rec.deltaOIpct;
-  const obImbalance = rec.obImbalance;
-
-  let oiScore = 0;
+  // --- M6 : OI + Orderbook (0–10) ---
+  let m6 = 0;
   if (deltaOI != null) {
-    if (Math.abs(deltaOI) > 0.5 && Math.abs(deltaOI) < 5) oiScore = 10;
-    else if (Math.abs(deltaOI) < 8) oiScore = 5;
-    else oiScore = 2;
+    const a = Math.abs(deltaOI);
+    if (a >= 0.3 && a <= 3) {
+      m6 = 6;
+    } else if (a <= 8) {
+      m6 = 4;
+    } else {
+      m6 = 2;
+    }
   }
-  score += oiScore;
+  if (obImbalance != null) {
+    const ao = Math.abs(obImbalance);
+    if (ao >= 5 && ao <= 20) {
+      m6 += 3;
+    } else if (ao > 20) {
+      m6 += 1;
+    }
+  }
+  m6 = clamp(m6, 0, 10);
+  score += m6;
 
   return clamp(score, 0, 100);
 }
@@ -215,11 +381,13 @@ function calculateJDSSwing(rec, c15m, c1h, c4h) {
 // ========= ORDERBOOK ANALYSIS =========
 
 function analyzeOrderbook(depth) {
-  if (!depth.bids.length || !depth.asks.length) return { imbalance: 0, pressure: "neutral" };
+  if (!depth.bids.length || !depth.asks.length) {
+    return { imbalance: 0, pressure: "neutral" };
+  }
 
   const bidVolume = depth.bids.reduce((sum, [, vol]) => sum + vol, 0);
   const askVolume = depth.asks.reduce((sum, [, vol]) => sum + vol, 0);
-  const total = bidVolume + askVolume;
+  const total     = bidVolume + askVolume;
 
   if (total === 0) return { imbalance: 0, pressure: "neutral" };
 
@@ -237,28 +405,32 @@ async function processSymbol(symbol) {
   const [tk, oi] = await Promise.all([getTicker(symbol), getOI(symbol)]);
   if (!tk) return null;
 
-  const last = +tk.last;
+  const last   = +tk.last;
   const high24 = +tk.high24h;
-  const low24 = +tk.low24h;
-  const vol24 = +tk.baseVolume;
+  const low24  = +tk.low24h;
+  const vol24  = +tk.baseVolume;
 
   const openInterest = oi ? +oi.amount : null;
-  const prev = prevOI.get(symbol) ?? null;
-  const deltaOI = (prev != null && openInterest != null && prev !== 0) ? ((openInterest - prev) / prev) * 100 : null;
+  const prev         = prevOI.get(symbol) ?? null;
+  const deltaOI      = (prev != null && openInterest != null && prev !== 0)
+    ? ((openInterest - prev) / prev) * 100
+    : null;
   prevOI.set(symbol, openInterest ?? prev);
 
   const [c15m, c1h, c4h] = await Promise.all([
-    getCandles(symbol, 900, 400),
-    getCandles(symbol, 3600, 400),
+    getCandles(symbol, 900,   400),
+    getCandles(symbol, 3600,  400),
     getCandles(symbol, 14400, 400)
   ]);
 
-  const depth = await getDepth(symbol);
-  const obAnalysis = analyzeOrderbook(depth);
+  const depth       = await getDepth(symbol);
+  const obAnalysis  = analyzeOrderbook(depth);
 
   const volaPct = (last && high24 && low24) ? ((high24 - low24) / last) * 100 : null;
-  const tend24 = (high24 > low24 && last) ? (((last - low24) / (high24 - low24)) * 200 - 100) : null;
-  const posDay = positionInDay(last, low24, high24);
+  const tend24  = (high24 > low24 && last)
+    ? (((last - low24) / (high24 - low24)) * 200 - 100)
+    : null;
+  const posDay  = positionInDay(last, low24, high24);
 
   const vwap1h = vwap(c1h.slice(-48));
   const vwap4h = vwap(c4h.slice(-48));
@@ -271,38 +443,51 @@ async function processSymbol(symbol) {
   const atr4hPct = atr4h && last ? (atr4h / last) * 100 : null;
 
   const closes15m = c15m.map(x => x.c);
-  const closes1h = c1h.map(x => x.c);
-  const closes4h = c4h.map(x => x.c);
+  const closes1h  = c1h.map(x => x.c);
+  const closes4h  = c4h.map(x => x.c);
 
   const rsi15 = rsi(closes15m, 14);
-  const rsi1h = rsi(closes1h, 14);
-  const rsi4h = rsi(closes4h, 14);
+  const rsi1h = rsi(closes1h,  14);
+  const rsi4h = rsi(closes4h,  14);
 
   return {
-    symbol, last, high24, low24, vol24, volaPct, tend24, posDay,
+    symbol,
+    last,
+    high24,
+    low24,
+    vol24,
+    volaPct,
+    tend24,
+    posDay,
     deltaVWAP1h: deltaVWAP1h != null ? num(deltaVWAP1h, 4) : null,
     deltaVWAP4h: deltaVWAP4h != null ? num(deltaVWAP4h, 4) : null,
-    deltaOIpct: deltaOI != null ? num(deltaOI, 3) : null,
-    atr1hPct: atr1hPct != null ? num(atr1hPct, 4) : null,
-    atr4hPct: atr4hPct != null ? num(atr4hPct, 4) : null,
-    obImbalance: obAnalysis.imbalance,
-    obPressure: obAnalysis.pressure,
-    rsi: { "15m": num(rsi15, 2), "1h": num(rsi1h, 2), "4h": num(rsi4h, 2) },
-    c15m, c1h, c4h
+    deltaOIpct:   deltaOI     != null ? num(deltaOI, 3) : null,
+    atr1hPct:     atr1hPct    != null ? num(atr1hPct, 4) : null,
+    atr4hPct:     atr4hPct    != null ? num(atr4hPct, 4) : null,
+    obImbalance:  obAnalysis.imbalance,
+    obPressure:   obAnalysis.pressure,
+    rsi: {
+      "15m": num(rsi15, 2),
+      "1h":  num(rsi1h,  2),
+      "4h":  num(rsi4h,  2)
+    },
+    c15m,
+    c1h,
+    c4h
   };
 }
 
 // ========= DÉTECTION DIRECTION =========
 
 function detectDirection(rec, jdsSwing) {
-  const vwap1h = rec.deltaVWAP1h;
-  const vwap4h = rec.deltaVWAP4h;
-  const rsi1h = rec.rsi["1h"];
-  const rsi4h = rec.rsi["4h"];
-  const obPressure = rec.obPressure;
-  const deltaOI = rec.deltaOIpct;
+  const vwap1h    = rec.deltaVWAP1h;
+  const vwap4h    = rec.deltaVWAP4h;
+  const rsi1h     = rec.rsi["1h"];
+  const rsi4h     = rec.rsi["4h"];
+  const obPressure= rec.obPressure;
+  const deltaOI   = rec.deltaOIpct;
 
-  let longScore = 0;
+  let longScore  = 0;
   let shortScore = 0;
 
   // VWAP bias
@@ -311,11 +496,11 @@ function detectDirection(rec, jdsSwing) {
   if (vwap4h != null && vwap4h < 0) longScore += 2;
   if (vwap4h != null && vwap4h > 0) shortScore += 2;
 
-  // RSI bias
-  if (rsi1h != null && rsi1h < 50) longScore += 1;
-  if (rsi1h != null && rsi1h > 50) shortScore += 1;
-  if (rsi4h != null && rsi4h < 50) longScore += 1;
-  if (rsi4h != null && rsi4h > 50) shortScore += 1;
+  // RSI bias (corrigé : RSI>50 = bias LONG)
+  if (rsi1h != null && rsi1h > 50) longScore += 1;
+  if (rsi1h != null && rsi1h < 50) shortScore += 1;
+  if (rsi4h != null && rsi4h > 50) longScore += 1;
+  if (rsi4h != null && rsi4h < 50) shortScore += 1;
 
   // OB pressure
   if (obPressure === "bullish") longScore += 2;
@@ -332,9 +517,9 @@ function detectDirection(rec, jdsSwing) {
 // ========= CONDITIONS MARCHÉ =========
 
 function shouldAvoidMarket(rec) {
-  const atr1h = rec.atr1hPct;
-  const vola24 = rec.volaPct;
-  const vwap4h = rec.deltaVWAP4h;
+  const atr1h   = rec.atr1hPct;
+  const vola24  = rec.volaPct;
+  const vwap4h  = rec.deltaVWAP4h;
   const deltaOI = rec.deltaOIpct;
 
   // ATR 1h trop violent
@@ -348,7 +533,7 @@ function shouldAvoidMarket(rec) {
 
   // OB contradictoire (fort déséquilibre inverse)
   if (rec.obPressure === "bullish" && deltaOI != null && deltaOI < -3) return "OB contradictoire";
-  if (rec.obPressure === "bearish" && deltaOI != null && deltaOI > 3) return "OB contradictoire";
+  if (rec.obPressure === "bearish" && deltaOI != null && deltaOI > 3)  return "OB contradictoire";
 
   return null;
 }
@@ -356,7 +541,7 @@ function shouldAvoidMarket(rec) {
 // ========= CALCUL ENTRÉE/SL/TP =========
 
 function calculateTradePlan(rec, direction, jdsSwing) {
-  const last = rec.last;
+  const last  = rec.last;
   const atr1h = rec.atr1hPct ? (rec.atr1hPct / 100) * last : last * 0.01;
   const atr4h = rec.atr4hPct ? (rec.atr4hPct / 100) * last : last * 0.015;
 
@@ -364,25 +549,28 @@ function calculateTradePlan(rec, direction, jdsSwing) {
 
   if (direction === "LONG") {
     entry = last - (0.7 * atr1h);
-    sl = entry - (1.2 * atr4h);
+    sl    = entry - (1.2 * atr4h);
     const slDist = entry - sl;
-    tp1 = entry + (1.0 * slDist);
-    tp2 = entry + (2.0 * slDist);
+    tp1   = entry + (1.0 * slDist);
+    tp2   = entry + (2.0 * slDist);
   } else {
     entry = last + (0.7 * atr1h);
-    sl = entry + (1.2 * atr4h);
+    sl    = entry + (1.2 * atr4h);
     const slDist = sl - entry;
-    tp1 = entry - (1.0 * slDist);
-    tp2 = entry - (2.0 * slDist);
+    tp1   = entry - (1.0 * slDist);
+    tp2   = entry - (2.0 * slDist);
   }
 
-  const decimals = last < 0.0001 ? 7 : last < 0.01 ? 6 : last < 0.1 ? 5 : 4;
+  const decimals =
+    last < 0.0001 ? 7 :
+    last < 0.01   ? 6 :
+    last < 0.1    ? 5 : 4;
 
   return {
     entry: num(entry, decimals),
-    sl: num(sl, decimals),
-    tp1: num(tp1, decimals),
-    tp2: num(tp2, decimals)
+    sl:    num(sl,    decimals),
+    tp1:   num(tp1,   decimals),
+    tp2:   num(tp2,   decimals)
   };
 }
 
@@ -390,8 +578,8 @@ function calculateTradePlan(rec, direction, jdsSwing) {
 
 function getRecommendedLeverage(vola24) {
   if (vola24 == null) return "2x";
-  if (vola24 < 5) return "3x";
-  if (vola24 <= 10) return "2x";
+  if (vola24 < 5)     return "3x";
+  if (vola24 <= 10)   return "2x";
   return "1x";
 }
 
@@ -403,15 +591,15 @@ function estimateDuration(jdsSwing, rec) {
   const avgTrend = (Math.abs(trend1h) + Math.abs(trend4h)) / 2;
 
   if (jdsSwing >= 90 && avgTrend > 40) return "3h-12h";
-  if (jdsSwing >= 85) return "6h-24h";
-  if (jdsSwing >= 75) return "12h-36h";
+  if (jdsSwing >= 85)                  return "6h-24h";
+  if (jdsSwing >= 75)                  return "12h-36h";
   return "24h-48h";
 }
 
 // ========= MOVE TO BE =========
 
 function getMoveToBeCondition(direction) {
-  return `TP1 atteint OU +1×ATR(1h) OU divergence RSI(15m) contre position`;
+  return "TP1 atteint OU +1×ATR(1h) OU divergence RSI(15m) contre position";
 }
 
 // ========= ANTI-SPAM =========
@@ -440,9 +628,13 @@ async function sendTelegram(text) {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "Markdown" })
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "Markdown"
+      })
     });
-  } catch (e) { }
+  } catch (e) {}
 }
 
 // ========= SCAN COMPLET =========
@@ -454,8 +646,10 @@ async function scanOnce() {
   const BATCH_SIZE = 5;
 
   for (let i = 0; i < SYMBOLS.length; i += BATCH_SIZE) {
-    const batch = SYMBOLS.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(batch.map(symbol => processSymbol(symbol).catch(e => null)));
+    const batch   = SYMBOLS.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(symbol => processSymbol(symbol).catch(e => null))
+    );
     for (const res of results) if (res) snapshots.push(res);
     if (i + BATCH_SIZE < SYMBOLS.length) await sleep(1000);
   }
@@ -475,22 +669,22 @@ async function scanOnce() {
     const direction = detectDirection(rec, jdsSwing);
 
     // Filtre OI purge/construction contradictoire
-    if (direction === "LONG" && rec.deltaOIpct != null && rec.deltaOIpct < -2) continue;
-    if (direction === "SHORT" && rec.deltaOIpct != null && rec.deltaOIpct > 2) continue;
+    if (direction === "LONG"  && rec.deltaOIpct != null && rec.deltaOIpct < -2) continue;
+    if (direction === "SHORT" && rec.deltaOIpct != null && rec.deltaOIpct >  2) continue;
 
-    const plan = calculateTradePlan(rec, direction, jdsSwing);
+    const plan     = calculateTradePlan(rec, direction, jdsSwing);
     const leverage = getRecommendedLeverage(rec.volaPct);
     const duration = estimateDuration(jdsSwing, rec);
     const moveToBe = getMoveToBeCondition(direction);
 
     const setup = {
-      symbol: rec.symbol,
+      symbol:   rec.symbol,
       direction,
       jdsSwing: num(jdsSwing, 1),
-      entry: plan.entry,
-      sl: plan.sl,
-      tp1: plan.tp1,
-      tp2: plan.tp2,
+      entry:    plan.entry,
+      sl:       plan.sl,
+      tp1:      plan.tp1,
+      tp2:      plan.tp2,
       leverage,
       duration,
       moveToBe,
@@ -511,13 +705,16 @@ async function scanOnce() {
 
   if (primeSetups.length === 0 && readySetups.length === 0) {
     message = "📊 *JTF SWING — RAS*";
-    // await sendTelegram(message); // Optionnel si tu veux éviter le spam "RAS"
+    await sendTelegram(message);  // RAS à chaque scan si rien
     console.log("✅ Aucun setup détecté.");
     return;
   }
 
   // Priorité aux PRIME
-  const setupsToSend = primeSetups.length > 0 ? primeSetups : readySetups.slice(0, 3);
+  const setupsToSend = primeSetups.length > 0
+    ? primeSetups
+    : readySetups.slice(0, 3);
+
   const state = primeSetups.length > 0 ? "PRIME" : "READY";
 
   message = `🎯 *JTF SWING — ${state} DÉTECTÉ*\n\n`;
@@ -544,13 +741,19 @@ async function scanOnce() {
 
   if (message.includes("Entry")) {
     await sendTelegram(message);
+    console.log(`✅ ${state} envoyé (${setupsToSend.length} setup(s)).`);
+  } else {
+    console.log("ℹ️ Aucun setup à envoyer (bloqué par anti-spam).");
   }
-  console.log(`✅ ${state} envoyé (${setupsToSend.length} setup(s)).`);
 }
+
+// ========= MAIN =========
 
 async function main() {
   console.log("🚀 JTF SWING BOT v1.0 — Démarré.");
-  await sendTelegram("🟢 *JTF SWING BOT v1.0* démarré.\nScan toutes les 30min. Très peu de signaux. Très forte robustesse.");
+  await sendTelegram(
+    "🟢 *JTF SWING BOT v1.0* démarré.\nScan toutes les 30min. Très peu de signaux. Très forte robustesse."
+  );
 
   while (true) {
     try {
