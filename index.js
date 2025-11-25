@@ -1,29 +1,33 @@
-// index.js — CHEF D'ORCHESTRE ULTIME
-// Lance le serveur Web + 3 Bots (Autoselect, Discovery, Degen)
+// index.js — CHEF D’ORCHESTRE ULTIME
+// Lance le serveur Web + 4 Bots (Autoselect, Discovery, Degen, Swing)
 
-import http from "http";
-import { startAutoselect } from "./autoselect.js";
-import { startDiscovery } from "./discovery.js";
-import { startDegen } from "./degen.js"; // <--- NOUVEAU
+import http from “http”;
+import { startAutoselect } from “./autoselect.js”;
+import { startDiscovery } from “./discovery.js”;
+import { startDegen } from “./degen.js”;
+import { startSwing } from “./swing.js”; // <— NOUVEAU
 
 // ========= RAILWAY KEEPALIVE =========
 const PORT = process.env.PORT || 8080;
 http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("🤖 JTF TRI-BOT IS RUNNING (Autoselect + Discovery + Degen)");
+res.writeHead(200);
+res.end(“🤖 JTF QUAD-BOT IS RUNNING (Autoselect + Discovery + Degen + Swing)”);
 }).listen(PORT, () => {
-  console.log(`🛡️ Serveur Global écoute sur le port ${PORT}`);
+console.log(`🛡️ Serveur Global écoute sur le port ${PORT}`);
 });
 
 // ========= LANCEMENT DES MOTEURS =========
 
-console.log("🏁 Démarrage de la flotte (3 Bots)...");
+console.log(“🏁 Démarrage de la flotte (4 Bots)…”);
 
 // 1. Bot Top 30 (Autoselect)
-startAutoselect().catch(e => console.error("❌ CRASH Autoselect:", e));
+startAutoselect().catch(e => console.error(“❌ CRASH Autoselect:”, e));
 
 // 2. Bot Mid-Caps (Discovery)
-startDiscovery().catch(e => console.error("❌ CRASH Discovery:", e));
+startDiscovery().catch(e => console.error(“❌ CRASH Discovery:”, e));
 
-// 3. Bot Low-Caps (Degen) - NOUVEAU
-startDegen().catch(e => console.error("❌ CRASH Degen:", e));
+// 3. Bot Low-Caps (Degen)
+startDegen().catch(e => console.error(“❌ CRASH Degen:”, e));
+
+// 4. Bot Swing Trading (Swing) - NOUVEAU
+startSwing().catch(e => console.error(“❌ CRASH Swing:”, e));
