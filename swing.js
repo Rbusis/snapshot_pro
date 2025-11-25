@@ -1,4 +1,4 @@
-// swing.js — JTF SWING BOT v1.2
+// swing.js — JTF SWING BOT v1.3
 // Swing Trading basé sur cycles 1h–4h (qualité uniquement)
 // - Scan toutes les 30 min
 // - Très peu de signaux (READY / PRIME uniquement)
@@ -6,6 +6,7 @@
 // - SL/TP via ATR 1h/4h (adapté à la volatilité)
 // - Direction via VWAP, RSI, OB, OI
 // - R:R et durée estimée dans le message Telegram
+// - v1.3 : TIMING FILTER (bougie 1h, VWAP extension, ATR, volume, OI)
 
 import fetch from "node-fetch";
 
@@ -445,6 +446,105 @@ function detectDirection(rec, jdsSwing) {
   return longScore >= shortScore ? "LONG" : "SHORT";
 }
 
+// ========= TIMING FILTER (v1.3) =========
+// Si le timing est mauvais, on NE VEUT PAS de signal, même si JDS-SWING est haut.
+
+function isTimingGood(rec, direction) {
+  const c1h = rec.c1h;
+  if (!c1h || c1h.length < 22) {
+    console.log(`⏳ ${rec.symbol} ignoré (pas assez de bougies 1h pour timing).`);
+    return false;
+  }
+
+  const lastCandle = c1h[c1h.length - 1];
+  const closes1h   = c1h.map(x => x.c);
+  const ema20_1h   = ema(closes1h, 20);
+
+  if (!lastCandle || !ema20_1h) {
+    console.log(`⏳ ${rec.symbol} ignoré (EMA20 1h indisponible).`);
+    return false;
+  }
+
+  const bodyTop    = Math.max(lastCandle.o, lastCandle.c);
+  const bodyBottom = Math.min(lastCandle.o, lastCandle.c);
+  const totalRange = lastCandle.h - lastCandle.l || 1e-9;
+  const upperWick  = lastCandle.h - bodyTop;
+  const lowerWick  = bodyBottom - lastCandle.l;
+
+  // 1️⃣ Bougie 1h de confirmation
+  if (direction === "LONG") {
+    const hasNiceWick = lowerWick > totalRange * 0.25;
+    if (!(lastCandle.c > ema20_1h && hasNiceWick)) {
+      console.log(`⏳ ${rec.symbol} LONG ignoré (bougie 1h non confirmée).`);
+      return false;
+    }
+  } else {
+    const hasNiceWick = upperWick > totalRange * 0.25;
+    if (!(lastCandle.c < ema20_1h && hasNiceWick)) {
+      console.log(`⏳ ${rec.symbol} SHORT ignoré (bougie 1h non confirmée).`);
+      return false;
+    }
+  }
+
+  // 2️⃣ VWAP extension obligatoire
+  const v1 = rec.deltaVWAP1h;
+  const v4 = rec.deltaVWAP4h;
+  if (v1 == null || v4 == null) {
+    console.log(`⏳ ${rec.symbol} ignoré (VWAP manquant).`);
+    return false;
+  }
+
+  if (direction === "SHORT") {
+    if (v1 < 1.2 || v4 < 0.5) {
+      console.log(`⏳ ${rec.symbol} SHORT ignoré (VWAP pas assez étendu: 1h=${v1} 4h=${v4}).`);
+      return false;
+    }
+  } else {
+    if (v1 > -1.2 || v4 > -0.5) {
+      console.log(`⏳ ${rec.symbol} LONG ignoré (VWAP pas assez étendu: 1h=${v1} 4h=${v4}).`);
+      return false;
+    }
+  }
+
+  // 3️⃣ ATR 1h sweet spot 0.35–1.6%
+  const atr1hPct = rec.atr1hPct;
+  if (atr1hPct == null || atr1hPct < 0.35 || atr1hPct > 1.6) {
+    console.log(`⏳ ${rec.symbol} ignoré (ATR1h hors sweet spot: ${atr1hPct}).`);
+    return false;
+  }
+
+  // 4️⃣ Volume 1h > moyenne vol 20 dernières 1h
+  const vols = c1h.map(x => x.v);
+  if (vols.length < 21) {
+    console.log(`⏳ ${rec.symbol} ignoré (pas assez de volume 1h pour timing).`);
+    return false;
+  }
+  const lastVol = vols[vols.length - 1];
+  const avgVol  = vols.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
+  if (lastVol < avgVol * 1.05) {
+    console.log(`⏳ ${rec.symbol} ignoré (volume 1h pas assez impulsif: last=${lastVol}, avg20=${avgVol}).`);
+    return false;
+  }
+
+  // 5️⃣ OI dans le bon sens du trade
+  const dOI = rec.deltaOIpct;
+  if (dOI == null) {
+    console.log(`⏳ ${rec.symbol} ignoré (deltaOI nul).`);
+    return false;
+  }
+  if (direction === "LONG" && dOI <= 0) {
+    console.log(`⏳ ${rec.symbol} LONG ignoré (deltaOI <= 0: ${dOI}).`);
+    return false;
+  }
+  if (direction === "SHORT" && dOI >= 0) {
+    console.log(`⏳ ${rec.symbol} SHORT ignoré (deltaOI >= 0: ${dOI}).`);
+    return false;
+  }
+
+  // Si tout est OK, timing validé
+  return true;
+}
+
 // ========= CONDITIONS MARCHÉ =========
 
 function shouldAvoidMarket(rec) {
@@ -599,7 +699,7 @@ async function sendTelegram(text) {
 // ========= SCAN COMPLET =========
 
 async function scanOnce() {
-  console.log("🔍 JTF SWING BOT v1.2 — Scan en cours…");
+  console.log("🔍 JTF SWING BOT v1.3 — Scan en cours…");
 
   const snapshots = [];
   const BATCH_SIZE = 5;
@@ -638,6 +738,11 @@ async function scanOnce() {
     if (direction === "LONG"  && rec.deltaOIpct != null && rec.deltaOIpct < -2) continue;
     if (direction === "SHORT" && rec.deltaOIpct != null && rec.deltaOIpct >  2) continue;
 
+    // v1.3 : TIMING FILTER — si timing mauvais on skip, même si READY/PRIME
+    if (!isTimingGood(rec, direction)) {
+      continue;
+    }
+
     const plan     = calculateTradePlan(rec, direction, jdsSwing);
     const leverage = getRecommendedLeverage(rec.volaPct);
     const duration = estimateDuration(jdsSwing, rec);
@@ -670,7 +775,7 @@ async function scanOnce() {
   let message = "";
 
   if (primeSetups.length === 0 && readySetups.length === 0) {
-    message = "📊 *JTF SWING — RAS*\nAucun setup READY/PRIME sur ce scan.";
+    message = "📊 *JTF SWING — RAS*\nAucun setup READY/PRIME sur ce scan (timing strict v1.3).";
     await sendTelegram(message);
     console.log("✅ Aucun setup détecté (RAS envoyé).");
     return;
@@ -713,8 +818,8 @@ async function scanOnce() {
 // ========= MAIN =========
 
 async function main() {
-  console.log("🚀 JTF SWING BOT v1.2 — Démarré.");
-  await sendTelegram("🟢 *JTF SWING BOT v1.2* démarré.\nScan toutes les 30min. Très peu de signaux. Filtres swing multi-TF (1h/4h) + ATR + VWAP + OB/OI + filtre vola/RSI.");
+  console.log("🚀 JTF SWING BOT v1.3 — Démarré.");
+  await sendTelegram("🟢 *JTF SWING BOT v1.3* démarré.\nScan toutes les 30min. Très peu de signaux. Filtres swing multi-TF (1h/4h) + ATR + VWAP + OB/OI + filtre vola/RSI + TIMING ultra strict.");
 
   while (true) {
     try {
