@@ -1,4 +1,4 @@
-// swing.js — JTF SWING BOT v1.1
+// swing.js — JTF SWING BOT v1.2
 // Swing Trading basé sur cycles 1h–4h (qualité uniquement)
 // - Scan toutes les 30 min
 // - Très peu de signaux (READY / PRIME uniquement)
@@ -20,7 +20,7 @@ const SCAN_INTERVAL_MS   = 30 * 60_000;
 // Délai anti-spam entre 2 signaux identiques (par symbole/direction/state)
 const MIN_ALERT_DELAY_MS = 30 * 60_000;
 
-// TOP SWING — Liste qualité + liquidité (tu pourras ajuster si besoin)
+// TOP SWING — Liste qualité + liquidité
 const SYMBOLS = [
   "BTCUSDT_UMCBL", "ETHUSDT_UMCBL", "BNBUSDT_UMCBL", "SOLUSDT_UMCBL", "XRPUSDT_UMCBL",
   "AVAXUSDT_UMCBL", "LINKUSDT_UMCBL", "DOTUSDT_UMCBL", "TRXUSDT_UMCBL", "ADAUSDT_UMCBL",
@@ -38,7 +38,7 @@ const MAX_VOLA_24            = 25;
 const MAX_VWAP_4H_DEVIATION  = 4;
 
 // ========= MÉMOIRE =========
-const prevOI    = new Map();
+const prevOI     = new Map();
 const lastAlerts = new Map();
 
 // ========= UTILS =========
@@ -342,7 +342,8 @@ function calculateJDSSwing(rec) {
     const rsiMax  = Math.max(r15, r1, r4);
     const spread  = rsiMax - rsiMin;
 
-    if (rsiAvg > 35 && rsiAvg < 65 && spread <= 15) m3 = 20;
+    // v1.2 : sweet spot resserré
+    if (rsiAvg > 38 && rsiAvg < 62 && spread <= 12) m3 = 20;
     else if (rsiAvg > 30 && rsiAvg < 70) m3 = 12;
     else m3 = 5;
   }
@@ -365,7 +366,8 @@ function calculateJDSSwing(rec) {
   const posDay = rec.posDay;
   const tend24 = rec.tend24;
   if (posDay != null && tend24 != null) {
-    if ((posDay > 30 && posDay < 70) || Math.abs(tend24) > 25) m5 = 10;
+    // v1.2 : zone "belle" resserrée
+    if ((posDay > 35 && posDay < 65) || Math.abs(tend24) > 30) m5 = 10;
     else if (Math.abs(tend24) > 10) m5 = 6;
     else m5 = 3;
   }
@@ -392,7 +394,6 @@ function calculateJDSSwing(rec) {
 
   const total = clamp(score, 0, 100);
 
-  // Debug interne (console seulement)
   console.log(
     `📊 JDS-SWING ${rec.symbol} = ${total.toFixed(1)} | ` +
     `M1=${m1.toFixed(1)} M2=${m2.toFixed(1)} M3=${m3.toFixed(1)} ` +
@@ -405,12 +406,12 @@ function calculateJDSSwing(rec) {
 // ========= DÉTECTION DIRECTION =========
 
 function detectDirection(rec, jdsSwing) {
-  const vwap1h    = rec.deltaVWAP1h;
-  const vwap4h    = rec.deltaVWAP4h;
-  const rsi1h     = rec.rsi["1h"];
-  const rsi4h     = rec.rsi["4h"];
-  const obPressure= rec.obPressure;
-  const deltaOI   = rec.deltaOIpct;
+  const vwap1h     = rec.deltaVWAP1h;
+  const vwap4h     = rec.deltaVWAP4h;
+  const rsi1h      = rec.rsi["1h"];
+  const rsi4h      = rec.rsi["4h"];
+  const obPressure = rec.obPressure;
+  const deltaOI    = rec.deltaOIpct;
 
   let longScore  = 0;
   let shortScore = 0;
@@ -451,6 +452,20 @@ function shouldAvoidMarket(rec) {
   const vola24 = rec.volaPct;
   const vwap4h = rec.deltaVWAP4h;
   const deltaOI= rec.deltaOIpct;
+
+  // v1.2 : volatilité minimale pour du swing
+  if (vola24 != null && vola24 < 3) {
+    return "Volatilité trop faible (<3%) — Swing ignoré";
+  }
+
+  // RSI trop plat = marché en range
+  const r15 = rec.rsi?.["15m"];
+  const r1  = rec.rsi?.["1h"];
+  const r4  = rec.rsi?.["4h"];
+  if (r15 != null && r1 != null && r4 != null) {
+    const spread = Math.max(r15, r1, r4) - Math.min(r15, r1, r4);
+    if (spread < 5) return "RSI trop plat (<5 pts) — marché en range";
+  }
 
   if (atr1h != null && atr1h > MAX_ATR_1H_PCT) return "ATR 1h trop élevé";
   if (vola24 != null && vola24 > MAX_VOLA_24)   return "Volatilité 24h excessive";
@@ -542,7 +557,6 @@ function estimateDuration(jdsSwing, rec) {
 // ========= MOVE TO BE =========
 
 function getMoveToBeCondition(direction) {
-  // Direction gardée pour une éventuelle nuance plus tard (LONG/SHORT)
   return "TP1 atteint OU +1×ATR(1h) OU divergence RSI(15m) contre position";
 }
 
@@ -566,7 +580,7 @@ function shouldSendAlert(symbol, direction, state) {
 // ========= TELEGRAM =========
 
 async function sendTelegram(text) {
-  if (!TELEGRAM_BOT_TOKEN || ! TELEGRAM_CHAT_ID) return;
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -585,7 +599,7 @@ async function sendTelegram(text) {
 // ========= SCAN COMPLET =========
 
 async function scanOnce() {
-  console.log("🔍 JTF SWING BOT v1.1 — Scan en cours…");
+  console.log("🔍 JTF SWING BOT v1.2 — Scan en cours…");
 
   const snapshots = [];
   const BATCH_SIZE = 5;
@@ -609,6 +623,12 @@ async function scanOnce() {
     const avoidReason = shouldAvoidMarket(rec);
     if (avoidReason) {
       console.log(`⛔ ${rec.symbol} ignoré: ${avoidReason}`);
+      continue;
+    }
+
+    // v1.2 : READY "faibles" ignorés si vola < 6%
+    if (jdsSwing < 82 && rec.volaPct != null && rec.volaPct < 6) {
+      console.log(`⚪ ${rec.symbol} ignoré (READY mou, vola<6%)`);
       continue;
     }
 
@@ -693,8 +713,8 @@ async function scanOnce() {
 // ========= MAIN =========
 
 async function main() {
-  console.log("🚀 JTF SWING BOT v1.1 — Démarré.");
-  await sendTelegram("🟢 *JTF SWING BOT v1.1* démarré.\nScan toutes les 30min. Très peu de signaux. Filtres swing multi-TF (1h/4h) + ATR + VWAP + OB/OI.");
+  console.log("🚀 JTF SWING BOT v1.2 — Démarré.");
+  await sendTelegram("🟢 *JTF SWING BOT v1.2* démarré.\nScan toutes les 30min. Très peu de signaux. Filtres swing multi-TF (1h/4h) + ATR + VWAP + OB/OI + filtre vola/RSI.");
 
   while (true) {
     try {
