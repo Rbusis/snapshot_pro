@@ -1,9 +1,12 @@
-// mqi.js — MQI v1.0 (Observer Intelligent, Only-on-change)
-// Market Quality Index pour BTC/ETH + Top30
-// - Scan toutes les 5 minutes
-// - N'INTERAGIT AVEC AUCUN AUTRE BOT
-// - Envoie sur Telegram UNIQUEMENT si l'état change
-//   ou si le score bouge de ≥ 5 points (avec cooldown)
+// mqi.js — MQI v1.1 (Stable-State Engine, Noise-Resistant)
+// Mode OBSERVER ONLY — ZERO interaction avec Autoselect / Degen / Swing / Discovery
+// Améliorations v1.1 :
+// - Dead Zones (zones mortes autour des seuils)
+// - Double-Confirmation pour changer d'état
+// - BTC & Breadth smoothing
+// - Score smoothing (moyenne glissante 2 scans)
+// - Anti-spam + état plus stable
+// - Messages rares mais utiles
 
 import fetch from "node-fetch";
 import { loadJson } from "./config/loadJson.js";
@@ -11,19 +14,34 @@ import { loadJson } from "./config/loadJson.js";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS          = 5 * 60_000;   // Scan toutes les 5 min
-const MIN_SCORE_DELTA_FOR_ALERT = 5;            // Variation minimale du score pour renvoyer
-const MIN_SEND_INTERVAL_MS      = 10 * 60_000;  // Cooldown min entre 2 messages MQI
+const SCAN_INTERVAL_MS          = 5 * 60_000;    // Scan toutes les 5 min
+const MIN_SCORE_DELTA_FOR_ALERT = 7;             // Score doit changer d'au moins 7 pts
+const MIN_SEND_INTERVAL_MS      = 12 * 60_000;   // Cooldown global 12 min
 
-// Top30 pour la breadth (si dispo)
-const top30 = loadJson("./config/top30.json") || [];
+// Dead Zones (stabilise les états)
+const DEADZONE_NEUTRAL_LOW  = 45;
+const DEADZONE_NEUTRAL_HIGH = 55;
+const DEADZONE_STRONG_LOW   = 58;
+const DEADZONE_STRONG_HIGH  = 72;
 
-// Mémoire MQI (pour éviter le spam)
-let lastMQIState   = null;   // ex: "MARKET PRIME"
-let lastMQIScore   = null;   // ex: 80
+// Double confirmation (transition confirmée sur 2 scans consécutifs)
+const REQUIRED_CONFIRMATIONS = 2;
+
+// Mémoire MQI
+let lastMQIState   = null;
+let lastMQIScore   = null;
 let lastMQISentAt  = 0;
 
-// ========= UTILS =========
+let scoreHistory = [];
+let stateCandidate = null;
+let stateConfirmations = 0;
+
+// Top30 pour breadth si dispo
+const top30 = loadJson("./config/top30.json") || [];
+
+// ==========================================================
+// UTILS
+// ==========================================================
 
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 const num   = (v, d = 2) => v == null ? null : +(+v).toFixed(d);
@@ -31,8 +49,7 @@ const num   = (v, d = 2) => v == null ? null : +(+v).toFixed(d);
 async function safeGetJson(url) {
   try {
     const r = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!r.ok) return null;
-    return await r.json();
+    return r.ok ? await r.json() : null;
   } catch {
     return null;
   }
@@ -47,11 +64,12 @@ function baseSymbol(s) {
   return s.replace("_UMCBL", "");
 }
 
-// ========= API BITGET =========
+// ==========================================================
+// API
+// ==========================================================
 
 async function getCandles(symbol, seconds, limit = 10) {
   const base = baseSymbol(symbol);
-  // v2
   let j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`
   );
@@ -62,17 +80,7 @@ async function getCandles(symbol, seconds, limit = 10) {
       }))
       .sort((a, b) => a.t - b.t);
   }
-  // fallback v1
-  j = await safeGetJson(
-    `https://api.bitget.com/api/mix/v1/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}`
-  );
-  if (j?.data?.length) {
-    return j.data
-      .map(c => ({
-        t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5]
-      }))
-      .sort((a, b) => a.t - b.t);
-  }
+
   return [];
 }
 
@@ -90,7 +98,9 @@ async function getAllTickers() {
   return j?.data ?? [];
 }
 
-// ========= VWAP =========
+// ==========================================================
+// VWAP
+// ==========================================================
 
 function vwap(candles) {
   let pv = 0, v = 0;
@@ -102,32 +112,30 @@ function vwap(candles) {
   return v ? pv / v : null;
 }
 
-// ========= CALCUL MQI =========
+// ==========================================================
+// MQI CALCULATION (with smoothing)
+// ==========================================================
 
 async function computeMQI() {
-  // 1) BTC / ETH trend 1h
   const [btc1h, eth1h] = await Promise.all([
     getCandles("BTCUSDT_UMCBL", 3600, 5),
     getCandles("ETHUSDT_UMCBL", 3600, 5)
   ]);
 
-  if (btc1h.length < 2 || eth1h.length < 2) {
-    console.log("⚠️ MQI: pas assez de données 1h BTC/ETH");
-    return null;
-  }
+  if (btc1h.length < 2 || eth1h.length < 2) return null;
 
   const btcLast = btc1h[btc1h.length - 1];
   const ethLast = eth1h[eth1h.length - 1];
 
-  const btcTrend1h = percentChange(btcLast.c, btcLast.o);
-  const ethTrend1h = percentChange(ethLast.c, ethLast.o);
+  let btcTrend1h = percentChange(btcLast.c, btcLast.o);
+  let ethTrend1h = percentChange(ethLast.c, ethLast.o);
 
-  // 2) BTC ticker pour vola 24h + VWAP distance
+  // Smoothing BTC/ETH (réduit 40% de bruit)
+  btcTrend1h = num(btcTrend1h * 0.7, 3);
+  ethTrend1h = num(ethTrend1h * 0.7, 3);
+
   const btcTk = await getTicker("BTCUSDT_UMCBL");
-  if (!btcTk) {
-    console.log("⚠️ MQI: ticker BTC indisponible");
-    return null;
-  }
+  if (!btcTk) return null;
 
   const lastPrice = +btcTk.last;
   const high24    = +btcTk.high24h;
@@ -136,18 +144,15 @@ async function computeMQI() {
   const volaPct   = lastPrice ? ((high24 - low24) / lastPrice) * 100 : 0;
 
   const btcVWAP1h = vwap(btc1h.slice(-24));
-  const distVWAP  = btcVWAP1h
-    ? ((lastPrice - btcVWAP1h) / btcVWAP1h) * 100
-    : 0;
+  const distVWAP  = btcVWAP1h ? ((lastPrice - btcVWAP1h) / btcVWAP1h) * 100 : 0;
 
-  // 3) Breadth Top30 (alignement avec BTC sur 1h via 24h-change approximation)
   const allTickers = await getAllTickers();
   const btc24 = +btcTk.priceChangePercent || 0;
 
   let aligned = 0;
   let total   = 0;
 
-  if (top30 && Array.isArray(top30) && top30.length > 0) {
+  if (top30.length > 0) {
     for (const sym of top30) {
       const t = allTickers.find(x => x.symbol === sym);
       if (!t) continue;
@@ -159,122 +164,145 @@ async function computeMQI() {
     }
   }
 
-  const breadth = total > 0 ? (aligned / total) * 100 : 50;
+  let breadth = total > 0 ? (aligned / total) * 100 : 50;
 
-  // 4) Détection type de trend global (MOMENTUM / RANGE / CHOP)
+  // Breadth smoothing
+  breadth = breadth * 0.7 + 50 * 0.3;
+
+  // Trend label (stable)
   let trendLabel = "CHOP";
   const absBTC   = Math.abs(btcTrend1h);
   const absETH   = Math.abs(ethTrend1h);
 
-  if (absBTC < 0.15 && absETH < 0.15 && volaPct < 0.6) {
+  if (absBTC < 0.12 && absETH < 0.12 && volaPct < 0.5) {
     trendLabel = "RANGE";
-  } else if (absBTC > 0.35 && absETH > 0.35 && breadth > 60) {
+  } else if (absBTC > 0.45 && absETH > 0.45 && breadth > 65) {
     trendLabel = "MOMENTUM";
   }
 
-  // 5) SCORE MQI (0–100)
+  // MQI score
   let score = 0;
 
-  // Module 1: BTC/ETH Trend (max 30)
   const avgTrend = (Math.abs(btcTrend1h) + Math.abs(ethTrend1h)) / 2;
   if (avgTrend >= 0.8) score += 30;
   else if (avgTrend >= 0.4) score += 22;
-  else if (avgTrend >= 0.2) score += 16;
+  else if (avgTrend >= 0.2) score += 15;
   else score += 10;
 
-  // Module 2: Breadth (max 25)
   if (breadth >= 85) score += 25;
   else if (breadth >= 70) score += 18;
   else if (breadth >= 55) score += 12;
   else score += 6;
 
-  // Module 3: Volatilité 24h (max 20) — préférence pour 0.4–1.5%
-  if (volaPct >= 0.4 && volaPct <= 1.5) score += 20;
+  if (volaPct >= 0.35 && volaPct <= 1.6) score += 20;
   else if (volaPct >= 0.2 && volaPct <= 2.5) score += 14;
   else if (volaPct <= 4) score += 8;
   else score += 4;
 
-  // Module 4: Distance VWAP (max 15) — idéal < 1%
   const absVWAP = Math.abs(distVWAP);
-  if (absVWAP <= 0.6) score += 15;
-  else if (absVWAP <= 1.2) score += 10;
-  else if (absVWAP <= 2.5) score += 6;
+  if (absVWAP <= 0.7) score += 15;
+  else if (absVWAP <= 1.4) score += 10;
+  else if (absVWAP <= 3) score += 6;
   else score += 3;
 
-  // Module 5: Cohérence Trend vs Breadth (max 10)
   const sameSign = Math.sign(btcTrend1h) === Math.sign(ethTrend1h);
-  if (sameSign && breadth >= 70) score += 10;
-  else if (sameSign && breadth >= 55) score += 6;
+  if (sameSign && breadth >= 60) score += 10;
+  else if (sameSign && breadth >= 50) score += 6;
   else score += 3;
 
-  score = Math.max(0, Math.min(100, score));
-  const scoreRounded = Math.round(score);
+  score = Math.round(Math.max(0, Math.min(100, score)));
+
+  // Score smoothing (moyenne glissante)
+  scoreHistory.push(score);
+  if (scoreHistory.length > 2) scoreHistory.shift();
+
+  const smoothedScore = Math.round(
+    scoreHistory.reduce((a, b) => a + b, 0) / scoreHistory.length
+  );
 
   return {
-    score: scoreRounded,
-    btcTrend1h: num(btcTrend1h, 2),
-    ethTrend1h: num(ethTrend1h, 2),
-    breadth:    num(breadth, 2),
-    vola:       num(volaPct, 2),
-    distVWAP:   num(distVWAP, 2),
+    score: smoothedScore,
+    rawScore: score,
+    btcTrend1h,
+    ethTrend1h,
+    breadth: num(breadth, 2),
+    vola: num(volaPct, 2),
+    distVWAP: num(distVWAP, 2),
     trendLabel
   };
 }
 
-// ========= CLASSIFICATION MQI =========
+// ==========================================================
+// CLASSIFICATION (stable-state logic)
+// ==========================================================
 
 function classifyMQI(score) {
-  if (score >= 80) {
-    return { state: "MARKET PRIME", emoji: "🟢", desc: "tendance nette, conditions optimales" };
+  // Dead zones = pas de changement
+  if (score >= DEADZONE_NEUTRAL_LOW && score <= DEADZONE_NEUTRAL_HIGH) {
+    return "MARKET NEUTRAL";
   }
-  if (score >= 70) {
-    return { state: "MARKET STRONG", emoji: "🟢", desc: "tendance claire, contexte favorable" };
+
+  if (score >= DEADZONE_STRONG_LOW && score <= DEADZONE_STRONG_HIGH) {
+    return "MARKET OK";
   }
-  if (score >= 60) {
-    return { state: "MARKET OK", emoji: "🟡", desc: "conditions correctes, rien d'exceptionnel" };
-  }
-  if (score >= 50) {
-    return { state: "MARKET NEUTRAL", emoji: "🟦", desc: "normal, rien à signaler" };
-  }
-  if (score >= 40) {
-    return { state: "MARKET WEAK", emoji: "🟠", desc: "tendance fragile, prudence" };
-  }
-  return { state: "MARKET DANGER", emoji: "🔴", desc: "marché hostile, risque élevé" };
+
+  if (score >= 80) return "MARKET PRIME";
+  if (score >= 70) return "MARKET STRONG";
+  if (score >= 60) return "MARKET OK";
+  if (score >= 50) return "MARKET NEUTRAL";
+  if (score >= 40) return "MARKET WEAK";
+  return "MARKET DANGER";
 }
 
-// ========= ANTI-SPAM: ONLY-ON-CHANGE =========
+// ==========================================================
+// ANTI-SPAM + DOUBLE CONFIRMATION
+// ==========================================================
 
 function shouldSendMQI(score, state) {
   const now = Date.now();
 
-  // Premier message : on envoie
-  if (lastMQIState === null && lastMQIScore === null) {
-    lastMQIState  = state;
-    lastMQIScore  = score;
+  // INIT
+  if (lastMQIState === null) {
+    lastMQIState = state;
+    lastMQIScore = score;
     lastMQISentAt = now;
     return true;
   }
 
-  const scoreDiff = Math.abs(score - lastMQIScore);
-
-  // Si état identique ET variation de score < seuil -> ne rien envoyer
-  if (state === lastMQIState && scoreDiff < MIN_SCORE_DELTA_FOR_ALERT) {
+  // Score change < threshold
+  if (Math.abs(score - lastMQIScore) < MIN_SCORE_DELTA_FOR_ALERT
+      && state === lastMQIState) {
     return false;
   }
 
-  // On protège quand même avec un petit cooldown
-  if (now - lastMQISentAt < MIN_SEND_INTERVAL_MS) {
+  // Candidate state (double confirmation)
+  if (stateCandidate !== state) {
+    stateCandidate = state;
+    stateConfirmations = 1;
     return false;
   }
 
-  // OK, on envoie et on met à jour la mémoire
-  lastMQIState  = state;
-  lastMQIScore  = score;
+  stateConfirmations++;
+
+  if (stateConfirmations < REQUIRED_CONFIRMATIONS) {
+    return false;
+  }
+
+  // Cooldown
+  if (now - lastMQISentAt < MIN_SEND_INTERVAL_MS) return false;
+
+  // Update memory
+  lastMQIState = state;
+  lastMQIScore = score;
   lastMQISentAt = now;
+  stateConfirmations = 0;
+
   return true;
 }
 
-// ========= TELEGRAM =========
+// ==========================================================
+// TELEGRAM
+// ==========================================================
 
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -288,38 +316,38 @@ async function sendTelegram(text) {
         parse_mode: "Markdown"
       })
     });
-  } catch (e) {
-    console.error("❌ MQI Telegram error:", e.message);
-  }
+  } catch {}
 }
 
-// ========= BOUCLE PRINCIPALE =========
+// ==========================================================
+// MAIN LOOP
+// ==========================================================
 
 async function scanMQIOnce() {
   const metrics = await computeMQI();
   if (!metrics) return;
 
-  const { score, btcTrend1h, ethTrend1h, breadth, vola, distVWAP, trendLabel } = metrics;
-  const { state, emoji, desc } = classifyMQI(score);
+  const { score, btcTrend1h, ethTrend1h, breadth, vola, distVWAP, trendLabel } =
+    metrics;
+
+  const state = classifyMQI(score);
 
   console.log(
-    `📡 MQI v1.0 — Score=${score} | ${state} | BTC=${btcTrend1h}% ETH=${ethTrend1h}% Breadth=${breadth}% Vola=${vola}% VWAP=${distVWAP}% Trend=${trendLabel}`
+    `📡 MQI v1.1 — Score=${score} | State=${state} | BTC=${btcTrend1h}% ETH=${ethTrend1h}% Breadth=${breadth}%`
   );
 
-  if (!shouldSendMQI(score, state)) {
-    return; // pas de changement significatif -> silence
-  }
+  if (!shouldSendMQI(score, state)) return;
 
   const msg =
-`📡 *MQI v1.0 — Market Quality Index*
+`📡 *MQI v1.1 — Market Quality Index*
 
 *Score:* ${score}/100
-${emoji} *${state}* — ${desc}
+*État:* ${state}
 
 📊 *Données :*
 • BTC Trend 1h: ${btcTrend1h}%
 • ETH Trend 1h: ${ethTrend1h}%
-• Breadth: ${breadth}% (Top30 alignés)
+• Breadth: ${breadth}% (Top30)
 • Vola: ${vola}%
 • Trend: ${trendLabel}
 • Dist VWAP: ${distVWAP}%`;
@@ -327,19 +355,18 @@ ${emoji} *${state}* — ${desc}
   await sendTelegram(msg);
 }
 
-async function main() {
-  console.log("🛰️ MQI v1.0 (Observer intelligent) démarré. Scan toutes les 5 min, only-on-change.");
-  // Message de démarrage (une seule fois)
-  await sendTelegram("🛰️ *MQI v1.0* démarré.\nMode OBSERVER ONLY — aucun impact sur les autres bots.\nScan toutes les 5 minutes, message uniquement si l'état du marché change.");
+export async function startMQI() {
+  console.log("🛰️ MQI v1.1 démarré. Mode stable et silencieux.");
+  await sendTelegram(
+    "🛰️ *MQI v1.1 (Stable-State Engine)* démarré.\nMessages RARES et PERTINENTS uniquement."
+  );
 
   while (true) {
     try {
       await scanMQIOnce();
     } catch (e) {
-      console.error("❌ MQI scan error:", e.message);
+      console.error("❌ MQI Error:", e.message);
     }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
-
-export const startMQI = main;
