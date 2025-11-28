@@ -7,6 +7,19 @@ import { startDiscovery } from "./discovery.js";
 import { startDegen } from "./degen.js";
 import { startSwing } from "./swing.js";
 
+// ========= SÉCURITÉ GLOBALE (CRASH-PROOF) =========
+
+// Empêche le container de s'arrêter sur une erreur non gérée
+process.on('uncaughtException', (err) => {
+  console.error('🔥 CRITICAL: Uncaught Exception Global:', err);
+  // On ne quitte PAS le processus, on log juste l'erreur
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🔥 CRITICAL: Unhandled Rejection Global:', reason);
+  // On ne quitte PAS le processus
+});
+
 // ========= KEEPALIVE RAILWAY =========
 const PORT = process.env.PORT || 8080;
 
@@ -26,7 +39,7 @@ console.log("🏁 Démarrage orchestré de la flotte JTF…");
   try {
     await startAutoselect();
   } catch (e) {
-    console.error("❌ CRASH Autoselect:", e);
+    console.error("❌ CRASH INIT Autoselect:", e);
   }
 })();
 
@@ -35,7 +48,7 @@ console.log("🏁 Démarrage orchestré de la flotte JTF…");
   try {
     await startDiscovery();
   } catch (e) {
-    console.error("❌ CRASH Discovery:", e);
+    console.error("❌ CRASH INIT Discovery:", e);
   }
 })();
 
@@ -44,7 +57,7 @@ console.log("🏁 Démarrage orchestré de la flotte JTF…");
   try {
     await startDegen();
   } catch (e) {
-    console.error("❌ CRASH Degen:", e);
+    console.error("❌ CRASH INIT Degen:", e);
   }
 })();
 
@@ -53,7 +66,7 @@ console.log("🏁 Démarrage orchestré de la flotte JTF…");
   try {
     await startSwing();
   } catch (e) {
-    console.error("❌ CRASH Swing:", e);
+    console.error("❌ CRASH INIT Swing:", e);
   }
 })();
 
