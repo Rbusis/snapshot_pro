@@ -1,39 +1,28 @@
-// discovery.js — JTF DISCOVERY v1.2 (Midcaps Momentum Scanner — API v2 ONLY)
+// autoselect.js — JTF v0.8.4 (Sniper Mode, FULL API v2)
+// TOP30 Bitget USDT Perp
+// FILTRE STRICT : Uniquement les signaux "TAKE". Silence radio sinon.
 
 import fetch from "node-fetch";
-import fs from "fs";
 import { loadJson } from "./config/loadJson.js";
 
-const top30 = loadJson("./config/top30.json");
+const top30 = loadJson("./config/top30.json"); // pas utilisé directement, mais gardé si besoin plus tard
 
 // ========= CONFIG =========
+
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS      = 5 * 60_000;
-const MIN_ALERT_DELAY_MS    = 15 * 60_000;
-const GLOBAL_COOLDOWN_MS    = 30 * 60_000;
-const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
+// Snapshot toutes les 5 minutes
+const SCAN_INTERVAL_MS   = 5 * 60_000;
 
-// Sécurité BTC
-const BTC_LONG_MIN  = -0.2;
-const BTC_SHORT_MAX = +0.5;
+// Anti-spam : délai min entre 2 envois pour même paire/direction
+const MIN_ALERT_DELAY_MS = 3 * 60_000;
 
-// État interne
-let DISCOVERY_SYMBOLS = [];
-let lastSymbolUpdate   = 0;
-let lastGlobalTradeTime = 0;
-const lastAlerts = new Map();
+// Délai de re-validation (désactivé)
+const VALIDATION_DELAY_MS = 0;
 
-// Fallback midcaps
-const FALLBACK_MIDCAPS = [
-  "INJUSDT_UMCBL", "FETUSDT_UMCBL", "RNDRUSDT_UMCBL", 
-  "ARBUSDT_UMCBL", "AGIXUSDT_UMCBL"
-];
-
-// Éviter les double couvertures
-const IGNORE_LIST = [
-  // Top majors + déjà couverts ailleurs
+// TOP30 Bitget USDT perp (Liste Fixe)
+const SYMBOLS = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
   "LINKUSDT_UMCBL","TONUSDT_UMCBL","SUIUSDT_UMCBL","APTUSDT_UMCBL","NEARUSDT_UMCBL",
@@ -42,6 +31,16 @@ const IGNORE_LIST = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
+// ------- Seuils -------
+const MIN_JDS_TRADE_NOW   = 65;
+const MIN_JDS_WAIT_ENTRY  = 45;
+const MAX_OI_FOR_SHORT_OK =  0.6;
+const MIN_OI_FOR_LONG_OK  = -0.6;
+
+// ========= MÉMOIRE =========
+const prevOI     = new Map();   // symbol -> dernier OI
+const lastAlerts = new Map();   // anti-spam Telegram
+
 // ========= UTILS =========
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
@@ -49,30 +48,30 @@ const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const baseSymbol = s => s.replace("_UMCBL","");
 
 async function safeGetJson(url){
-  try {
-    const r = await fetch(url, { headers:{ Accept:"application/json" } });
-    if (!r.ok) return null;
+  try{
+    const r = await fetch(url,{ headers:{ Accept:"application/json" } });
+    if(!r.ok) return null;
     return await r.json();
-  } catch {
+  }catch{
     return null;
   }
 }
 
-// ========= API v2 ONLY =========
+// ========= API BITGET — FULL v2 =========
 
-// CANDLES
-async function getCandles(symbol, seconds, limit=100){
+async function getCandles(symbol, seconds, limit=400){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`
   );
-  if (!j?.data?.length) return [];
-  return j.data.map(c=>({
-    t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
-  })).sort((a,b)=>a.t-b.t);
+  if(j?.data?.length){
+    return j.data.map(c=>({
+      t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
+    })).sort((a,b)=>a.t-b.t);
+  }
+  return [];
 }
 
-// TICKER
 async function getTicker(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -81,7 +80,30 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-// FUNDING
+async function getMarkPrice(symbol){
+  const base = baseSymbol(symbol);
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/mark-price?symbol=${base}&productType=usdt-futures`
+  );
+  if(j?.data?.markPrice!=null) return +j.data.markPrice;
+  const tk = await getTicker(symbol);
+  return tk?.markPrice ? +tk.markPrice : null;
+}
+
+async function getDepth(symbol){
+  const base = baseSymbol(symbol);
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/depth?symbol=${base}&limit=5&productType=usdt-futures`
+  );
+  if(j?.data?.bids && j.data.asks){
+    return {
+      bids: j.data.bids.map(x=>[+x[0],+x[1]]),
+      asks: j.data.asks.map(x=>[+x[0],+x[1]])
+    };
+  }
+  return { bids:[], asks:[] };
+}
+
 async function getFunding(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -90,82 +112,42 @@ async function getFunding(symbol){
   return j?.data ?? null;
 }
 
-// DEPTH
-async function getDepth(symbol){
+async function getOI(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/depth?symbol=${base}&limit=20&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${base}&productType=usdt-futures`
   );
-  return (j?.data?.bids && j?.data?.asks) ? j.data : null;
-}
-
-// FULL MARKET
-async function getAllTickers(){
-  const j = await safeGetJson(
-    "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-  );
-  return j?.data ?? [];
-}
-
-// ========= BTC TREND =========
-async function getBTCTrend(){
-  const c = await getCandles("BTCUSDT_UMCBL",3600,5);
-  if (!c.length) return null;
-  const last = c[c.length-1];
-  return ((last.c - last.o)/last.o)*100;
-}
-
-// ========= LISTE MIDCAPS =========
-async function updateDiscoveryList(){
-  try {
-    const all = await getAllTickers();
-    if (!all.length) return FALLBACK_MIDCAPS;
-
-    let list = all.filter(t =>
-      t.symbol.endsWith("_UMCBL") &&
-      !IGNORE_LIST.includes(t.symbol) &&
-      (+t.usdtVolume > 5_000_000)
-    );
-
-    list.sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume));
-    const midcaps = list.slice(0,50).map(t=>t.symbol);
-
-    // Sauvegarde locale
-    try {
-      fs.writeFileSync("./config/discovery_list.json", JSON.stringify(midcaps,null,2));
-    } catch(e){}
-
-    return midcaps.length ? midcaps : FALLBACK_MIDCAPS;
-  }
-  catch {
-    return FALLBACK_MIDCAPS;
-  }
+  return j?.data ?? null;
 }
 
 // ========= INDICATEURS =========
 
-function rsi(values,p=14){
-  if (!values || values.length < p+1) return null;
-  let g=0,l=0;
+function percent(a,b){ return b ? (a/b - 1)*100 : null; }
 
+function rsi(closes,p=14){
+  if(closes.length<p+1) return null;
+  let g=0,l=0;
   for(let i=1;i<=p;i++){
-    const d=values[i]-values[i-1];
+    const d=closes[i]-closes[i-1];
     if(d>=0) g+=d; else l-=d;
   }
-
   g/=p; l=(l/p)||1e-9;
   let rs=g/l;
-  let v=100-100/(1+rs);
-
-  for(let i=p+1;i<values.length;i++){
-    const d=values[i]-values[i-1];
-    g=(g*(p-1)+Math.max(d,0))/p;
-    l=((l*(p-1)+Math.max(-d,0))/p)||1e-9;
+  let val=100-100/(1+rs);
+  for(let i=p+1;i<closes.length;i++){
+    const d=closes[i]-closes[i-1];
+    const G=Math.max(d,0), L=Math.max(-d,0);
+    g=(g*(p-1)+G)/p;
+    l=((l*(p-1)+L)/p)||1e-9;
     rs=g/l;
-    v=100-100/(1+rs);
+    val=100-100/(1+rs);
   }
+  return val;
+}
 
-  return v;
+function closeChange(c,bars=1){
+  if(c.length<bars+1) return null;
+  return percent(c[c.length-1].c, c[c.length-1-bars].c);
 }
 
 function vwap(c){
@@ -175,292 +157,643 @@ function vwap(c){
     pv+=p*x.v;
     v+=x.v;
   }
-  return v?pv/v:null;
+  return v ? pv/v : null;
 }
 
-function calcWicks(c){
-  if (!c) return {upper:0,lower:0};
-  const top = Math.max(c.o,c.c);
-  const bot = Math.min(c.o,c.c);
+function positionInDay(last,low,high){
+  const r = high - low;
+  if(r<=0 || last==null) return null;
+  return ((last-low)/r)*100;
+}
+
+function toScore100(x){
+  return clamp((x+1)/2 * 100, 0, 100);
+}
+
+// ========= SNAPSHOT PAR PAIRE (MMS) =========
+
+async function processSymbol(symbol){
+  const [tk, fr, oi] = await Promise.all([
+    getTicker(symbol),
+    getFunding(symbol),
+    getOI(symbol)
+  ]);
+  if(!tk) return null;
+
+  const last   = +tk.last;
+  const high24 = +tk.high24h;
+  const low24  = +tk.low24h;
+  const vol24  = +tk.baseVolume;
+
+  const openInterest = oi ? +oi.amount : null;
+  const prev         = prevOI.get(symbol) ?? null;
+  const deltaOI      = (prev!=null && openInterest!=null && prev!==0)
+    ? ((openInterest - prev)/prev)*100
+    : null;
+  prevOI.set(symbol, openInterest ?? prev);
+
+  const [c1m,c5m,c15m,c1h,c4h] = await Promise.all([
+    getCandles(symbol,60,120),
+    getCandles(symbol,300,120),
+    getCandles(symbol,900,400),
+    getCandles(symbol,3600,400),
+    getCandles(symbol,14400,400)
+  ]);
+
+  const [depth, markPrice] = await Promise.all([
+    getDepth(symbol),
+    getMarkPrice(symbol)
+  ]);
+
+  let spreadPct = null;
+  if(depth.bids.length && depth.asks.length){
+    const b = depth.bids[0][0];
+    const a = depth.asks[0][0];
+    spreadPct = ((a-b)/((a+b)/2))*100;
+    if(spreadPct<0) spreadPct=-spreadPct;
+  }
+
+  const closes1m  = c1m.map(x=>x.c);
+  const closes5m  = c5m.map(x=>x.c);
+  const closes15m = c15m.map(x=>x.c);
+  const closes1h  = c1h.map(x=>x.c);
+  const closes4h  = c4h.map(x=>x.c);
+
+  const rsi1m = rsi(closes1m,14);
+  const rsi5m = rsi(closes5m,14);
+  const rsi15 = rsi(closes15m,14);
+  const rsi1h = rsi(closes1h,14);
+  const rsi4h = rsi(closes4h,14);
+
+  const var15m = closeChange(c15m,1);
+  const var1h  = closeChange(c1h,1);
+  const var4h  = closeChange(c4h,1);
+
+  const dP_1m  = closeChange(c1m,1);
+  const dP_5m  = closeChange(c5m,1);
+  const dP_15m = closeChange(c15m,1);
+
+  const volaPct = (last && high24 && low24)
+    ? ((high24 - low24)/last)*100
+    : null;
+
+  const tend24 = (high24 > low24 && last)
+    ? (((last-low24)/(high24-low24))*200 - 100)
+    : null;
+
+  const posDay = positionInDay(last,low24,high24);
+
+  const vwap1h   = vwap(c1h.slice(-48));
+  const deltaVWAP = (vwap1h && last) ? percent(last, vwap1h) : null;
+
+  const vwap4h   = vwap(c4h.slice(-48));
+  let deltaVWAPg = null;
+  if(vwap1h && vwap4h) deltaVWAPg=((vwap1h/vwap4h)-1)*100;
+
+  const fundingRate = fr ? +fr.fundingRate * 100 : null;
+
+  // MMS
+  const normLongFromDelta  = dp => dp==null ? 0 : clamp(-dp/2,-1,1);
+  const normShortFromDelta = dp => dp==null ? 0 : clamp(dp/2,-1,1);
+
+  const m5L  = normLongFromDelta(dP_5m);
+  const m15L = normLongFromDelta(dP_15m);
+  const m5S  = normShortFromDelta(dP_5m);
+  const m15S = normShortFromDelta(dP_15m);
+
+  const dvwapL = deltaVWAP!=null ? clamp(-deltaVWAP/2,-1,1) : 0;
+  const dvwapS = deltaVWAP!=null ? clamp(deltaVWAP/2,-1,1)  : 0;
+
+  const rsiL = rsi15!=null ? clamp((50-rsi15)/20,-1,1) : 0;
+  const rsiS = rsi15!=null ? clamp((rsi15-50)/20,-1,1) : 0;
+
+  const MMS_long_raw  = m15L*0.4 + m5L*0.2 + dvwapL*0.2 + rsiL*0.2;
+  const MMS_short_raw = m15S*0.4 + m5S*0.2 + dvwapS*0.2 + rsiS*0.2;
+
+  const MMS_long  = toScore100(MMS_long_raw);
+  const MMS_short = toScore100(MMS_short_raw);
+
   return {
-    upper: ((c.h-top)/c.c)*100,
-    lower: ((bot-c.l)/c.c)*100
+    symbol,
+    last,
+    markPrice,
+    high24,
+    low24,
+    vol24,
+    volaPct,
+    tend24,
+    posDay,
+    spreadPct:      spreadPct!=null ? num(spreadPct,4) : null,
+    deltaVWAPpct:   deltaVWAP!=null ? num(deltaVWAP,4):null,
+    deltaVWAPgPct:  deltaVWAPg!=null ? num(deltaVWAPg,4):null,
+    deltaOIpct:     deltaOI!=null ? num(deltaOI,3) :null,
+    fundingRatePct: fundingRate!=null ? num(fundingRate,6):null,
+    rsi: {
+      "1m":  num(rsi1m,2),
+      "5m":  num(rsi5m,2),
+      "15m": num(rsi15,2),
+      "1h":  num(rsi1h,2),
+      "4h":  num(rsi4h,2)
+    },
+    variationPct: {
+      "15m": num(var15m,2),
+      "1h":  num(var1h,2),
+      "4h":  num(var4h,2)
+    },
+    dP_1m:     num(dP_1m,2),
+    dP_5m:     num(dP_5m,2),
+    dP_15m:    num(dP_15m,2),
+    MMS_long,
+    MMS_short
   };
 }
 
-// ========= PROCESS PAIRE =========
+function fuseJDS(rec){
+  const L = rec.MMS_long;
+  const S = rec.MMS_short;
+  if(L==null && S==null) return null;
+  if((S??-999) > (L??-999)) return { direction:"SHORT", jds:S };
+  return { direction:"LONG", jds:L };
+}
 
-async function processDiscovery(symbol){
-  const [tk,,depth] = await Promise.all([
-    getTicker(symbol),
-    getFunding(symbol),
-    getDepth(symbol)
-  ]);
+function getSetupState(jds){
+  if(jds<30) return "DEAD";
+  if(jds<55) return "CHOP";
+  if(jds<70) return "WATCH";
+  if(jds<80) return "SETUP_EMERGENT";
+  if(jds<90) return "SETUP_READY";
+  return "SETUP_PRIME";
+}
 
-  if (!tk) return null;
+function getOiImpulse(deltaOIpct, volaPct){
+  if(deltaOIpct==null || volaPct==null || Math.abs(volaPct)<0.1)
+    return { score:0, label:"neutre" };
+  const score = deltaOIpct/volaPct;
+  let label;
+  if(score>0.10)      label="construction forte";
+  else if(score>=0.03)label="construction légère";
+  else if(score>-0.02)label="neutre";
+  else if(score<-0.03)label="purge";
+  else                label="neutre";
+  return { score, label };
+}
 
-  const last = +tk.last;
-  const high24 = +tk.high24h;
-  const low24  = +tk.low24h;
-  const volaPct = last ? ((high24-low24)/last)*100 : null;
+function isRSICoherent(rec, direction){
+  const r   = rec.rsi;
+  const r15 = r["15m"];
+  const r1h = r["1h"];
+  const r4h = r["4h"];
+  if(r15==null||r1h==null||r4h==null) return true;
+  if(direction==="LONG")  return r15<=r1h && r1h<=r4h;
+  else                    return r15>=r1h && r1h>=r4h;
+}
 
-  const [c5m, c15m] = await Promise.all([
-    getCandles(symbol,300,100),
-    getCandles(symbol,900,100)
-  ]);
-  if (!c5m.length) return null;
+function computeConfidence(rec, fusion, setupState, oiImpulse){
+  let conf = 50;
+  const jds = fusion.jds;
+  const dir = fusion.direction;
+  const dVW = rec.deltaVWAPpct;
+  const vola= rec.volaPct;
+  const r   = rec.rsi;
 
-  const closes5  = c5m.map(x=>x.c);
-  const rsi5     = rsi(closes5);
-  const rsi15    = rsi(c15m.map(x=>x.c));
+  if(jds>=90)      conf+=18;
+  else if(jds>=80) conf+=12;
+  else if(jds>=70) conf+=6;
+  else if(jds<50)  conf-=5;
 
-  const vwap5 = vwap(c5m.slice(-24));
-  const priceVsVwap = vwap5 ? ((last-vwap5)/vwap5)*100 : 0;
-
-  const wicks = calcWicks(c5m[c5m.length-1]);
-
-  const lastVol = c5m[c5m.length-1].v;
-  const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
-  const volRatio = avgVol>0 ? lastVol/avgVol : 1;
-
-  const change24 = tk.priceChangePercent ? (+tk.priceChangePercent)*100 : 0;
-
-  let obScore = 0;
-  let bidsVol=0, asksVol=0;
-
-  if (depth){
-    bidsVol = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
-    asksVol = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
-    if (asksVol>0){
-      const r = bidsVol/asksVol;
-      if (r>1.25) obScore=1;
-      else if (r<0.75) obScore=-1;
+  if(dVW!=null){
+    if(dir==="LONG"){
+      if(dVW<=-0.8 && dVW>=-10)          conf+=10;
+      else if(dVW<-15 || dVW>8)          conf-=8;
+    }else{
+      if(dVW>=0.8 && dVW<=10)            conf+=10;
+      else if(dVW>15 || dVW<-8)          conf-=8;
     }
   }
 
+  if(r["15m"]!=null && r["1h"]!=null && r["4h"]!=null){
+    let scoreRSI=0;
+    const frames=[r["15m"],r["1h"],r["4h"]];
+    if(dir==="LONG"){
+      for(const v of frames){
+        if(v<45) scoreRSI+=1;
+        else if(v>60) scoreRSI-=1;
+      }
+    }else{
+      for(const v of frames){
+        if(v>55) scoreRSI+=1;
+        else if(v<40) scoreRSI-=1;
+      }
+    }
+    conf+=scoreRSI*4;
+  }
+
+  if(!isRSICoherent(rec, dir)) conf-=10;
+
+  if(oiImpulse.label==="construction forte")      conf+=12;
+  else if(oiImpulse.label==="construction légère")conf+=6;
+  else if(oiImpulse.label==="purge")             conf-=12;
+
+  const dVG = rec.deltaVWAPgPct;
+  if(dVG!=null){
+    if(dir==="LONG"  && dVG<-0.3) conf+=6;
+    if(dir==="SHORT" && dVG> 0.3) conf+=6;
+    if(dir==="LONG"  && dVG> 1.5) conf-=6;
+    if(dir==="SHORT" && dVG<-1.5) conf-=6;
+  }
+
+  if(vola!=null){
+    if(vola>=2 && vola<=20)       conf+=4;
+    else if(vola>35 || vola<1)   conf-=8;
+  }
+
+  if(setupState==="DEAD") conf=Math.min(conf,55);
+  else if(setupState==="CHOP") conf=Math.min(conf,65);
+
+  return clamp(Math.round(conf),0,100);
+}
+
+function estimateRR(vola){
+  if(vola==null) return 1.4;
+  if(vola<2)  return 1.4;
+  if(vola<8)  return 1.6;
+  if(vola<15) return 1.4;
+  if(vola<25) return 1.2;
+  return 1.1;
+}
+
+function buildTradePlan(rec, fusion, jds, rr){
+  const price = rec.last;
+  const vola  = rec.volaPct??5;
+  const dir   = fusion.direction;
+
+  let riskPerc = clamp(vola/3, 0.5, 5);
+  const rewardPerc = riskPerc*rr;
+
+  let entry = price;
+  let sl, tp1, tp2;
+
+  if(dir==="LONG"){
+    sl = price*(1-riskPerc/100);
+    if(jds>=85){
+      tp1 = price*(1+(0.9*riskPerc)/100);
+      tp2 = price*(1+(2.5*riskPerc)/100);
+    }else{
+      tp1 = price*(1+rewardPerc/100);
+      tp2 = null;
+    }
+  }else{
+    sl = price*(1+riskPerc/100);
+    if(jds>=85){
+      tp1 = price*(1-(0.9*riskPerc)/100);
+      tp2 = price*(1-(2.5*riskPerc)/100);
+    }else{
+      tp1 = price*(1-rewardPerc/100);
+      tp2 = null;
+    }
+  }
+
+  const decimals = price<0.0001?7 : price<0.01?6 : price<0.1?5 : 4;
+
   return {
-    symbol,last,volaPct,rsi5,rsi15,
-    priceVsVwap,volRatio,change24,obScore,bidsVol,asksVol,wicks
+    entry: num(entry,decimals),
+    sl:    num(sl,decimals),
+    tp1:   num(tp1,decimals),
+    tp2:   tp2!=null ? num(tp2,decimals) : null,
+    riskPerc: num(riskPerc,2),
+    rr:       num(rr,2)
   };
 }
 
-// ========= ANALYSE LOGIQUE MIDCAP =========
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, direction, rsiCoherent, rec){
+  const dOI=rec.deltaOIpct;
 
-function analyzeCandidate(rec, btc){
-  if (!rec || btc==null) return null;
+  if(direction==="SHORT" && dOI!=null && dOI>MAX_OI_FOR_SHORT_OK) return "AVOID";
+  if(direction==="LONG"  && dOI!=null && dOI<MIN_OI_FOR_LONG_OK)  return "AVOID";
+  if(!rsiCoherent) return "AVOID";
 
-  // HARD FILTERS
-  if (rec.volRatio < 2) return null;
-  if (rec.volaPct < 3 || rec.volaPct > 22) return null;
+  let reco;
+  if(setupState==="DEAD")      reco="AVOID";
+  else if(setupState==="CHOP") reco="WAIT ENTRY";
+  else if(setupState==="WATCH" || setupState==="SETUP_EMERGENT") reco="WAIT ENTRY";
+  else if(setupState==="SETUP_READY") reco="TAKE — REDUCED";
+  else reco="TAKE NOW";
 
-  const gapAbs = Math.abs(rec.priceVsVwap);
-  if (gapAbs < 0.6 || gapAbs > 3.2) return null;
+  if(rr<1.05) reco="AVOID";
+  if(conf<45) return "AVOID";
 
-  if (!rec.rsi5) return null;
-
-  let direction = null;
-
-  if (rec.priceVsVwap > 0){
-    if (btc < BTC_LONG_MIN) return null;
-    if (rec.wicks.upper > 1.2) return null;
-    if (rec.obScore < 0) return null;
-    direction = "LONG";
-  } else {
-    if (btc > BTC_SHORT_MAX) return null;
-    if (rec.wicks.lower > 1.2) return null;
-    if (rec.obScore > 0) return null;
-    direction = "SHORT";
+  if(conf>=45 && conf<55){
+    if(reco==="TAKE NOW"||reco==="TAKE — REDUCED") reco="WAIT ENTRY";
   }
 
-  // SCORING
-  let score = 0;
-
-  // Volume
-  score += rec.volRatio >= 3 ? 30 : 15;
-
-  // VWAP Gap
-  if (gapAbs >= 1 && gapAbs <= 2.2) score += 20; else score += 10;
-
-  // RSI
-  if (direction==="LONG"){
-    if (rec.rsi5>=55 && rec.rsi5<=75) score += 15;
-    else score += 5;
-  } else {
-    if (rec.rsi5>=25 && rec.rsi5<=45) score += 15;
-    else score += 5;
+  if(reco==="TAKE NOW"){
+    const ok = jds>=MIN_JDS_TRADE_NOW && conf>=70 && rr>=1.2 &&
+               dVW!=null && Math.abs(dVW)<=14 &&
+               oiImpulse.label!=="purge";
+    if(!ok){
+      if(jds>=MIN_JDS_TRADE_NOW && conf>=60) reco="TAKE — REDUCED";
+      else reco="WAIT ENTRY";
+    }
   }
 
-  // OB
-  if ((direction==="LONG" && rec.obScore===1) ||
-      (direction==="SHORT" && rec.obScore===-1))
-    score += 15;
+  if(reco==="TAKE — REDUCED"){
+    const ok = jds>=MIN_JDS_WAIT_ENTRY && conf>=60 && oiImpulse.label!=="purge";
+    if(!ok) reco="WAIT ENTRY";
+  }
 
-  // Trend 24h
-  if ((direction==="LONG" && rec.change24>3) ||
-      (direction==="SHORT" && rec.change24<-3))
-    score += 10;
+  if(direction==="LONG"  && oiImpulse.label==="purge")              reco="AVOID";
+  if(direction==="SHORT" && oiImpulse.label==="construction forte") reco="AVOID";
 
-  // BTC Context
-  if ((direction==="LONG" && btc>=0) ||
-      (direction==="SHORT" && btc<=0))
-    score += 10;
+  const dVG=rec.deltaVWAPgPct;
+  if(dVG!=null){
+    if(direction==="LONG"  && dVG>3.0  && reco.includes("TAKE")) reco="WAIT ENTRY";
+    if(direction==="SHORT" && dVG<-3.0 && reco.includes("TAKE")) reco="WAIT ENTRY";
+  }
 
-  if (score < 78) return null;
+  return reco;
+}
 
-  // PLAN DE TRADE
-  const decimals = rec.last < 1 ? 5 : 3;
-  const pullback = clamp(gapAbs/4,0.4,1.0);
+function isNoisyMarket(rec){
+  const vola=rec.volaPct;
+  const dVW =rec.deltaVWAPpct;
+  const tend=rec.tend24;
+  const dOI =rec.deltaOIpct;
+  if(vola==null||dVW==null||tend==null||dOI==null) return false;
+  return (
+    vola<2 &&
+    dVW>=-0.5 && dVW<=0.5 &&
+    tend>=-15 && tend<=15 &&
+    dOI>=-2 && dOI<=2
+  );
+}
 
-  const limitEntry = direction==="LONG"
-    ? rec.last*(1-pullback/100)
-    : rec.last*(1+pullback/100);
+function shouldSendFor(symbol, direction, reco){
+  const key = `${symbol}-${direction}`;
+  const now = Date.now();
+  const last = lastAlerts.get(key);
+  if(!last){
+    lastAlerts.set(key, { ts:now, reco });
+    return true;
+  }
+  if(last.reco !== reco){
+    lastAlerts.set(key, { ts:now, reco });
+    return true;
+  }
+  if(now - last.ts < MIN_ALERT_DELAY_MS) return false;
+  lastAlerts.set(key, { ts:now, reco });
+  return true;
+}
 
-  const riskPct = clamp((rec.volaPct/5)*2,2,5);
-  const sl = direction==="LONG"
-    ? rec.last*(1-riskPct/100)
-    : rec.last*(1+riskPct/100);
+async function buildCandidateForSymbol(symbol, initialDirection) {
+  const rec = await processSymbol(symbol);
+  if (!rec) return null;
 
-  const tp = direction==="LONG"
-    ? rec.last*(1+(riskPct*2)/100)
-    : rec.last*(1-(riskPct*2)/100);
+  const fusion = fuseJDS(rec);
+  if (!fusion) return null;
 
-  const levier = riskPct>4 ? "2x" : "3x";
-  const obRatio = rec.asksVol>0 ? (rec.bidsVol/rec.asksVol).toFixed(2) : "N/A";
+  // Petit ajustement de direction si le VWAP est ultra bearish
+  if (fusion.direction === "LONG") {
+    if (rec.deltaVWAPpct <= -1.2)      fusion.direction = "SHORT";
+    if (rec.deltaVWAPgPct <= -2)       fusion.direction = "SHORT";
+  }
 
-  const reason =
-    rec.volRatio>=3 ? "Volume Spike" :
-    rec.obScore!==0 ? "Orderbook Pressure" :
-    "Momentum Propre";
+  const direction   = fusion.direction;
+  const jds         = fusion.jds;
+  const setupState  = getSetupState(jds);
+  const oiImpulse   = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+  const rsiCoherent = isRSICoherent(rec, direction);
+  const confiance   = computeConfidence(rec, fusion, setupState, oiImpulse);
+  const rr          = estimateRR(rec.volaPct);
+  const plan        = buildTradePlan(rec, fusion, jds, rr);
+  const reco        = computeRecommendation(
+    jds, confiance, rr, oiImpulse, rec.deltaVWAPpct,
+    setupState, direction, rsiCoherent, rec
+  );
 
   return {
-    symbol:rec.symbol,
+    symbol,
     direction,
-    score,
-    reason,
-    price:rec.last,
-    limitEntry:num(limitEntry,decimals),
-    sl:num(sl,decimals),
-    tp:num(tp,decimals),
-    riskPct:num(riskPct,2),
-    volRatio:num(rec.volRatio,1),
-    vola:num(rec.volaPct,1),
-    obRatio,
-    levier
+    jds,
+    setupState,
+    confiance,
+    oiImpulse,
+    rr:+plan.rr,
+    plan,
+    rec,
+    reco,
+    rsiCoherent
   };
+}
+
+function isTradeInvalidated(initial, latest) {
+  if (!latest) return true;
+  if (latest.reco === "AVOID" || latest.reco === "WAIT ENTRY") return true;
+  if (latest.direction !== initial.direction) return true;
+
+  const oldRec = initial.rec;
+  const newRec = latest.rec;
+
+  const oldDVW = oldRec.deltaVWAPpct;
+  const newDVW = newRec.deltaVWAPpct;
+
+  if (oldDVW!=null && newDVW!=null) {
+    if (oldDVW*newDVW<0)             return true;
+    if (Math.abs(newDVW)>15)         return true;
+  }
+
+  if (latest.direction==="LONG"  && latest.oiImpulse.label==="purge")              return true;
+  if (latest.direction==="SHORT" && latest.oiImpulse.label==="construction forte") return true;
+
+  const dVG = latest.rec.deltaVWAPgPct;
+  if (dVG!=null) {
+    if (latest.direction==="LONG"  && dVG>2.0)  return true;
+    if (latest.direction==="SHORT" && dVG<-2.0) return true;
+  }
+
+  if (!latest.rsiCoherent) return true;
+
+  const priceNow = newRec.last;
+  const sl       = initial.plan.sl;
+  const tp1      = initial.plan.tp1;
+
+  if (latest.direction==="LONG") {
+    if (priceNow<=sl)                         return true;
+    if (tp1!=null && priceNow>=tp1)          return true;
+  } else {
+    if (priceNow>=sl)                         return true;
+    if (tp1!=null && priceNow<=tp1)          return true;
+  }
+  return false;
+}
+
+function scheduleTradeValidation(initialTrade) {
+  if (VALIDATION_DELAY_MS <= 0) return;
+  if (initialTrade.reco !== "TAKE — REDUCED" && initialTrade.reco !== "TAKE NOW") return;
+  setTimeout(async () => {
+    try {
+      const latest = await buildCandidateForSymbol(initialTrade.symbol, initialTrade.direction);
+      const invalid = isTradeInvalidated(initialTrade, latest);
+      if (invalid) {
+        await sendTelegram(`⚠️ *Trade invalidé* sur ${initialTrade.symbol} (Validation rapide).`);
+        console.log(`⚠️ Trade invalidé sur ${initialTrade.symbol}`);
+      }
+    } catch (e) {}
+  }, VALIDATION_DELAY_MS);
 }
 
 // ========= TELEGRAM =========
 
 async function sendTelegram(text){
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  try {
+  if(!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try{
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
       method:"POST",
       headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({
         chat_id: TELEGRAM_CHAT_ID,
         text,
-        parse_mode:"Markdown"
+        parse_mode: "Markdown"
       })
     });
-  } catch(e){}
+  }catch(e){}
 }
 
-function checkAntiSpam(symbol,dir){
-  const k=`${symbol}-${dir}`;
-  const now=Date.now();
-  const last=lastAlerts.get(k);
-  if(last && now-last<MIN_ALERT_DELAY_MS) return false;
-  lastAlerts.set(k,now);
-  return true;
+function formatRecoWithEmoji(reco){
+  const map = {
+    "AVOID":          "🟥 AVOID",
+    "WAIT ENTRY":     "🟧 WAIT ENTRY",
+    "TAKE — REDUCED": "🟨 TAKE — REDUCED",
+    "TAKE NOW":       "🟩 TAKE NOW"
+  };
+  return map[reco] || reco;
 }
 
-// ========= MAIN LOOP =========
+// ========= SCAN COMPLET =========
 
-async function scanDiscovery(){
-  const now = Date.now();
+async function scanOnce(){
+  console.log("🔍 Scan JTF v0.8.4 (Autoselect / FULL API v2)...");
 
-  const btc = await getBTCTrend();
-  if (btc==null) {
-    console.log("⚠️ BTC DATA ERROR.");
-    return;
+  const snapshots = [];
+  const BATCH_SIZE = 5;
+
+  for (let i = 0; i < SYMBOLS.length; i += BATCH_SIZE) {
+    const batch = SYMBOLS.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(symbol => processSymbol(symbol).catch(() => null))
+    );
+    for (const res of results) if (res) snapshots.push(res);
+    if (i + BATCH_SIZE < SYMBOLS.length) await sleep(1000);
   }
 
-  if (now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
-    DISCOVERY_SYMBOLS = await updateDiscoveryList();
-    lastSymbolUpdate = now;
-    console.log(`🔄 Discovery list : ${DISCOVERY_SYMBOLS.length} paires.`);
-  }
+  const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
+  if(btcRec && isNoisyMarket(btcRec)) return;
 
-  console.log(`🚀 DISCOVERY v1.2 | BTC: ${btc.toFixed(2)}% | Pairs: ${DISCOVERY_SYMBOLS.length}`);
-
-  const BATCH = 5;
   const candidates = [];
+  for(const rec of snapshots){
+    const fusion = fuseJDS(rec);
+    if(!fusion) continue;
 
-  for(let i=0;i<DISCOVERY_SYMBOLS.length;i+=BATCH){
-    const batch = DISCOVERY_SYMBOLS.slice(i,i+BATCH);
-    const results = await Promise.all(batch.map(s=>processDiscovery(s)));
-    for(const r of results){
-      const s = analyzeCandidate(r, btc);
-      if(s) candidates.push(s);
-    }
-    await sleep(300);
+    const jds         = fusion.jds;
+    const setupState  = getSetupState(jds);
+    const oiImpulse   = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+    const rsiCoherent = isRSICoherent(rec, fusion.direction);
+    const confiance   = computeConfidence(rec, fusion, setupState, oiImpulse);
+    const rr          = estimateRR(rec.volaPct);
+    const plan        = buildTradePlan(rec, fusion, jds, rr);
+    const reco        = computeRecommendation(
+      jds, confiance, rr, oiImpulse, rec.deltaVWAPpct,
+      setupState, fusion.direction, rsiCoherent, rec
+    );
+
+    // MODE SILENCIEUX : aucune ligne de debug par paire
+
+    candidates.push({
+      symbol: rec.symbol,
+      direction: fusion.direction,
+      jds,
+      setupState,
+      confiance,
+      oiImpulse,
+      rr:+plan.rr,
+      plan,
+      rec,
+      reco,
+      rsiCoherent
+    });
   }
 
-  if (!candidates.length){
-    console.log("ℹ Aucun signal Discovery.");
+  // --- FILTRE STRICT TELEGRAM : ON GARDE UNIQUEMENT LES "TAKE" ---
+  const tradables = candidates
+    .filter(c => c.reco.includes("TAKE")) // filtre absolu
+    .sort((a,b)=>{
+      const order = {
+        "SETUP_PRIME":4,
+        "SETUP_READY":3,
+        "SETUP_EMERGENT":2,
+        "WATCH":1,
+        "CHOP":0,
+        "DEAD":0
+      };
+      const oa = order[a.setupState]??0;
+      const ob = order[b.setupState]??0;
+      if(ob!==oa) return ob-oa;
+      if(b.jds!==a.jds) return b.jds-a.jds;
+      return b.confiance-a.confiance;
+    })
+    .slice(0,3);
+
+  if(!tradables.length){
+    console.log("ℹ️ Aucun trade 'TAKE' sur ce snapshot. Silence.");
     return;
   }
 
-  const best = candidates.sort((a,b)=>b.score-a.score)[0];
+  const fresh = tradables.filter(c => shouldSendFor(c.symbol, c.direction, c.reco));
+  if(!fresh.length) return;
 
-  if (now-lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
-    console.log(`⏳ Cooldown : ${best.symbol} ignoré.`);
-    return;
-  }
+  const toValidate = fresh.filter(c => c.reco.includes("TAKE"));
 
-  if (!checkAntiSpam(best.symbol,best.direction)){
-    console.log(`⏳ Anti-spam : ${best.symbol} ignoré.`);
-    return;
-  }
+  const lines = [];
+  lines.push("📊 *JTF v0.8.4 AUTOSELECT — Signaux Confirmés*");
 
-  // Envoi
-  const emoji = best.direction==="LONG" ? "🚀" : "🪂";
+  tradables.forEach((c, idx) => {
+    const vola   = c.rec.volaPct??5;
+    const type   = vola>12 ? "Scalp" : "Swing";
+    const levier = vola<=5 ? "4x" : (vola<=15 ? "3x" : "2x");
+    const tpStr  = (c.jds>=85 && c.plan.tp2)
+      ? `${c.plan.tp1} / ${c.plan.tp2}`
+      : `${c.plan.tp1}`;
+    const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
 
-  const msg = 
-`⚡ *JTF DISCOVERY v1.2* ⚡
+    lines.push("");
+    lines.push(`*${idx+1}) ${c.symbol}*`);
+    lines.push(`${dirEmoji} *${c.direction} – ${type}*`);
+    lines.push(`💠 *Entry:* ${c.plan.entry}`);
+    lines.push(`🛡️ *SL:* ${c.plan.sl}`);
+    lines.push(`🎯 *TP:* ${tpStr}`);
+    lines.push(`📏 *R:R:* ${(+c.plan.rr).toFixed(1)} — *Lev:* ${levier}`);
+    lines.push(`🔥 *JDS:* ${c.jds.toFixed(1)}`);
+    lines.push(`🔍 *Confiance:* ${c.confiance}%`);
+    lines.push(formatRecoWithEmoji(c.reco));
+  });
 
-${emoji} *${best.symbol}* — ${best.direction}
-🏅 *Score:* ${best.score}/100
-🔎 *Setup:* ${best.reason}
-
-📉 *Limit Entry:* ${best.limitEntry}
-🔹 Market: ${best.price}
-
-🎯 TP: ${best.tp}
-🛑 SL: ${best.sl} (-${best.riskPct}%)
-
-⚖️ *Levier:* ${best.levier}
-📊 *Vol:* x${best.volRatio} | *Vola:* ${best.vola}% | *OB:* ${best.obRatio}
-
-_Midcap Momentum Logic_`;
-
-  await sendTelegram(msg);
-  lastGlobalTradeTime = now;
-
-  console.log(`✅ Signal Discovery envoyé: ${best.symbol}`);
+  await sendTelegram(lines.join("\n"));
+  for (const t of toValidate) scheduleTradeValidation(t);
+  console.log("✅ Snapshot envoyé (TAKE only).");
 }
 
-// ========= START =========
+// ========= MAIN =========
 
 async function main(){
-  console.log("🔥 Discovery v1.2 (API v2 only) démarré.");
-  await sendTelegram("🔥 *DISCOVERY v1.2* lancé (API v2 only, zero erreur).");
+  console.log("🚀 JTF v0.8.4 AUTOSELECT — Bot Démarré (FULL API v2).");
+  await sendTelegram("🟢 JTF v0.8.4 (Sniper Mode / FULL API v2) démarré. Silence tant que pas de TAKE.");
   while(true){
-    try { await scanDiscovery(); }
-    catch(e){ console.error("DISCOVERY Crash:",e); }
+    try{
+      await scanOnce();
+    }catch(e){
+      console.error("❌ Erreur scan:", e.message);
+    }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
 
-export const startDiscovery = main;
+export const startAutoselect = main;
