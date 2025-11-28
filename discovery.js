@@ -2,9 +2,6 @@
 
 import fetch from "node-fetch";
 import fs from "fs";
-import { loadJson } from "./config/loadJson.js";
-
-const top30 = loadJson("./config/top30.json");
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -107,12 +104,19 @@ async function getAllTickers(){
   return j?.data ?? [];
 }
 
-// ========= BTC TREND =========
+// ========= BTC TREND (RETRY PATTERN) =========
 async function getBTCTrend(){
-  const c = await getCandles("BTCUSDT_UMCBL",3600,5);
-  if (!c.length) return null;
-  const last = c[c.length-1];
-  return ((last.c - last.o)/last.o)*100;
+  let attempts = 0;
+  while(attempts < 3){
+    const c = await getCandles("BTCUSDT_UMCBL", 3600, 5);
+    if (c && c.length > 0) {
+      const last = c[c.length-1];
+      return ((last.c - last.o)/last.o)*100;
+    }
+    attempts++;
+    if(attempts < 3) await sleep(1000);
+  }
+  return null;
 }
 
 // ========= LISTE MIDCAPS =========
@@ -130,7 +134,7 @@ async function updateDiscoveryList(){
     list.sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume));
     const midcaps = list.slice(0,50).map(t=>t.symbol);
 
-    // Sauvegarde locale
+    // Sauvegarde locale (Optionnel, ignore erreur si FS en lecture seule)
     try {
       fs.writeFileSync("./config/discovery_list.json", JSON.stringify(midcaps,null,2));
     } catch(e){}
@@ -363,7 +367,9 @@ async function sendTelegram(text){
         parse_mode:"Markdown"
       })
     });
-  } catch(e){}
+  } catch(e){
+    console.error("Discovery Telegram Error:", e.message);
+  }
 }
 
 function checkAntiSpam(symbol,dir){
@@ -382,7 +388,7 @@ async function scanDiscovery(){
 
   const btc = await getBTCTrend();
   if (btc==null) {
-    console.log("⚠️ BTC DATA ERROR.");
+    console.log("⚠️ BTC DATA ERROR (Discovery paused).");
     return;
   }
 
@@ -455,7 +461,7 @@ _Midcap Momentum Logic_`;
 
 async function main(){
   console.log("🔥 Discovery v1.2 (API v2 only) démarré.");
-  await sendTelegram("🔥 *DISCOVERY v1.2* lancé (API v2 only, zero erreur).");
+  await sendTelegram("🔥 *DISCOVERY v1.2* lancé (API v2 only).");
   while(true){
     try { await scanDiscovery(); }
     catch(e){ console.error("DISCOVERY Crash:",e); }
