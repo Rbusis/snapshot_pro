@@ -64,9 +64,15 @@ async function getMarkPrice(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/mark-price?symbol=${base}&productType=usdt-futures`
   );
-  return j?.data?.markPrice ? +j.data.markPrice 
-     : j?.data?.indexPrice ? +j.data.indexPrice 
-     : null;
+
+  if (!j?.data) return null;
+
+  return j.data.markPrice
+    ? +j.data.markPrice
+    : j.data.indexPrice
+    ? +j.data.indexPrice
+    : null;
+}
 
 async function getDepth(symbol){
   const base = baseSymbol(symbol);
