@@ -1,8 +1,9 @@
-// degen.js — JTF DEGEN v1.1 Ultra-Sniper (API v2 FIXED)
+// degen.js — JTF DEGEN v1.1 Ultra-Sniper (API v2 FIXED + Strict Imports)
 // Lowcaps Momentum Sniper — très peu de signaux, mais "balles en or".
 
 import fetch from "node-fetch";
 import fs from "fs";
+import process from "node:process"; // Ajout explicite pour la compatibilité stricte
 
 // ========= LOAD JSON =========
 
@@ -263,7 +264,7 @@ function calcWicks(candle) {
 async function processDegen(symbol){
   const [tk, , depth] = await Promise.all([
     getTicker(symbol),
-    getFunding(symbol), // Gardé si besoin futur, mais non utilisé dans le calcul actuel
+    getFunding(symbol), // Gardé si besoin futur
     getDepth(symbol)
   ]);
   
@@ -297,7 +298,7 @@ async function processDegen(symbol){
   const wicks = calcWicks(currentCandle);
 
   const lastVol = currentCandle.v;
-  // Moyenne des 10 dernières bougies cloturées (exclure la courante pour la moyenne)
+  // Moyenne des 10 dernières bougies cloturées
   const avgVol = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol > 0 ? lastVol / avgVol : 1;
 
@@ -475,7 +476,6 @@ function checkAntiSpam(symbol, direction){
 async function scanDegen(){
   const now = Date.now();
   
-  // Update de la liste si nécessaire
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS = await updateDegenList();
     lastSymbolUpdate = now;
@@ -499,7 +499,6 @@ async function scanDegen(){
       const s = analyzeCandidate(r, btcChange);
       if (s) candidates.push(s);
     }
-    // Petit delai pour eviter le Rate Limit
     await sleep(300);
   }
 
@@ -508,7 +507,6 @@ async function scanDegen(){
     return;
   }
 
-  // Sélection du meilleur signal (Score puis Volume Ratio)
   const best = candidates.sort((a,b)=>{
     if (b.score !== a.score) return b.score - a.score;
     return (+b.volRatio) - (+a.volRatio);
@@ -546,7 +544,7 @@ _Wait for limit. No FOMO._`;
 }
 
 async function main(){
-  console.log("🔫 DEGEN v1.1 (API v2 FIXED) démarré.");
+  console.log("🔫 DEGEN v1.1 (API v2 FIXED + STRICT) démarré.");
   await sendTelegram("🔫 *DEGEN v1.1 (API v2)* activé.");
   while(true){
     try { await scanDegen(); }
