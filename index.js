@@ -1,45 +1,60 @@
-import http from 'http';
-import process from 'process'; // Ta syntaxe préférée
+// index.js — CHEF D'ORCHESTRE ULTIME (MQI OFF)
+// Serveur Web + 4 Bots : Autoselect, Discovery, Degen, Swing
 
-// --- CONFIGURATION SERVEUR (Indispensable pour Railway) ---
+import http from "http";
+import { startAutoselect } from "./autoselect.js";
+import { startDiscovery } from "./discovery.js";
+import { startDegen } from "./degen.js";
+import { startSwing } from "./swing.js";
+
+// ========= KEEPALIVE RAILWAY =========
 const PORT = process.env.PORT || 8080;
 
-const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('JTF Bot is Active');
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("🤖 JTF QUAD-BOT IS RUNNING (Autoselect + Discovery + Degen + Swing)");
+}).listen(PORT, () => {
+  console.log(`🛡️ Serveur Global écoute sur le port ${PORT}`);
 });
 
-// On démarre le serveur D'ABORD pour valider le Health Check
-server.listen(PORT, '0.0.0.0', async () => {
-    console.log(`✅ SERVEUR EN LIGNE sur le port ${PORT}`);
-    console.log("🚀 Lancement des bots via import...");
+// ========= LANCEMENT ORCHESTRÉ =========
 
-    // --- LANCEMENT DES BOTS ---
-    try {
-        // 1. Degen
-        // On utilise import() dynamique pour ne pas bloquer le chargement du serveur
-        const degen = await import('./degen.js');
-        if (degen.startDegen) {
-            degen.startDegen(); // On APPELLE la fonction, ce qui lance la boucle while(true)
-            console.log("🔹 DEGEN v1.1 démarré.");
-        } else {
-            console.error("⚠️ Fonction startDegen introuvable dans degen.js");
-        }
+console.log("🏁 Démarrage orchestré de la flotte JTF…");
 
-        // 2. Autoselect
-        const autoselect = await import('./autoselect.js');
-        if (autoselect.startAutoselect) {
-            autoselect.startAutoselect(); // On APPELLE la fonction
-            console.log("🔹 AUTOSELECT v0.8.4 démarré.");
-        } else {
-            console.error("⚠️ Fonction startAutoselect introuvable dans autoselect.js");
-        }
+// --- Autoselect ---
+(async () => {
+  try {
+    await startAutoselect();
+  } catch (e) {
+    console.error("❌ CRASH Autoselect:", e);
+  }
+})();
 
-    } catch (e) {
-        console.error("❌ Erreur fatale au lancement des bots :", e);
-    }
-});
+// --- Discovery ---
+(async () => {
+  try {
+    await startDiscovery();
+  } catch (e) {
+    console.error("❌ CRASH Discovery:", e);
+  }
+})();
 
-// Anti-crash global
-process.on('uncaughtException', (err) => console.error('🔥 Crash non géré :', err));
-process.on('unhandledRejection', (reason) => console.error('🔥 Promesse rejetée :', reason));
+// --- Degen ---
+(async () => {
+  try {
+    await startDegen();
+  } catch (e) {
+    console.error("❌ CRASH Degen:", e);
+  }
+})();
+
+// --- Swing ---
+(async () => {
+  try {
+    await startSwing();
+  } catch (e) {
+    console.error("❌ CRASH Swing:", e);
+  }
+})();
+
+console.log("🚀 Bots JTF opérationnels. MQI retiré.");
