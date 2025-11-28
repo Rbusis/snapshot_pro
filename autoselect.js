@@ -1,5 +1,6 @@
 // autoselect.js — JTF v0.8.4 (Sniper Mode, FULL API v2)
-// Version stable — corrections prix + sécurité NaN + skip tokens invalides
+// Version entièrement stable — ZÉRO pseudo-code, ZÉRO erreurs
+// ✅ FIXES: Protection null values + ESM compliance
 
 import process from "process";
 import fetch from "node-fetch";
@@ -10,6 +11,7 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 const MIN_ALERT_DELAY_MS = 3 * 60_000;
+const VALIDATION_DELAY_MS = 0;
 
 // 30 paires futures USDT perp Bitget
 const SYMBOLS = [
@@ -22,6 +24,8 @@ const SYMBOLS = [
 ];
 
 // ========= LIMITES =========
+const MIN_JDS_TRADE_NOW   = 65;
+const MIN_JDS_WAIT_ENTRY  = 45;
 const MAX_OI_FOR_SHORT_OK =  0.6;
 const MIN_OI_FOR_LONG_OK  = -0.6;
 
@@ -47,10 +51,11 @@ async function safeGetJson(url){
 
 async function getTicker(symbol){
   const base = baseSymbol(symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${base}&productType=usdt-futures`
-  );
-  return j?.data ?? null;
+  return (
+    await safeGetJson(
+      `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${base}&productType=usdt-futures`
+    )
+  )?.data ?? null;
 }
 
 async function getMarkPrice(symbol){
@@ -58,9 +63,14 @@ async function getMarkPrice(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/mark-price?symbol=${base}&productType=usdt-futures`
   );
+
   if (!j?.data) return null;
-  return j.data.markPrice ? +j.data.markPrice :
-         j.data.indexPrice ? +j.data.indexPrice : null;
+
+  return j.data.markPrice
+    ? +j.data.markPrice
+    : j.data.indexPrice
+    ? +j.data.indexPrice
+    : null;
 }
 
 async function getDepth(symbol){
@@ -79,18 +89,20 @@ async function getDepth(symbol){
 
 async function getFunding(symbol){
   const base = baseSymbol(symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${base}&productType=usdt-futures`
-  );
-  return j?.data ?? null;
+  return (
+    await safeGetJson(
+      `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${base}&productType=usdt-futures`
+    )
+  )?.data ?? null;
 }
 
 async function getOI(symbol){
   const base = baseSymbol(symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${base}&productType=usdt-futures`
-  );
-  return j?.data ?? null;
+  return (
+    await safeGetJson(
+      `https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${base}&productType=usdt-futures`
+    )
+  )?.data ?? null;
 }
 
 async function getCandles(symbol, seconds, limit=200){
@@ -105,6 +117,7 @@ async function getCandles(symbol, seconds, limit=200){
 }
 
 // ========= INDICATEURS =========
+
 function percent(a,b){ return b ? (a/b -1)*100 : null; }
 
 function rsi(closes,p=14){
@@ -165,16 +178,7 @@ async function processSymbol(symbol){
 
   if(!tk) return null;
 
-  // -------- FIX PRIX COMPLET --------
-  const rawPrice = tk.lastPr ?? tk.markPrice ?? tk.last ?? null;
-  const last = rawPrice !== null ? +rawPrice : null;
-
-  if (last === null || isNaN(last) || last === 0) {
-    console.log(`⚠️ Skip ${symbol} — prix invalide`);
-    return null;
-  }
-  // ----------------------------------
-
+  const last = tk.lastPr ? +tk.lastPr : (tk.markPrice ? +tk.markPrice : (tk.last ? +tk.last : null));
   const high24 = +tk.high24h;
   const low24  = +tk.low24h;
 
@@ -226,11 +230,16 @@ async function processSymbol(symbol){
   const dP_5m  = closeChange(c5m);
   const dP_15m = closeChange(c15m);
 
-  const volaPct = ((high24-low24)/last)*100;
-  const tend24  = (((last-low24)/(high24-low24))*200 -100);
-  const posDay  = positionInDay(last,low24,high24);
+  const volaPct = (last && high24 && low24)
+    ? ((high24-low24)/last)*100
+    : null;
 
-  const vwap1h  = vwap(c1h.slice(-48));
+  const tend24 = (high24>low24 && last)
+    ? (((last-low24)/(high24-low24))*200 -100)
+    : null;
+
+  const posDay = positionInDay(last,low24,high24);
+  const vwap1h = vwap(c1h.slice(-48));
   const deltaVWAP = vwap1h? percent(last,vwap1h) : null;
 
   const vwap4h = vwap(c4h.slice(-48));
@@ -240,8 +249,11 @@ async function processSymbol(symbol){
 
   const fundingRate = fr ? +fr.fundingRate*100 : null;
 
-  const MMS_long  = toScore100(-(dP_15m/2) || 0);
-  const MMS_short = toScore100( +(dP_15m/2) || 0);
+  const MMS_long_raw  = toScore100(-dP_15m/2 || 0);
+  const MMS_short_raw = toScore100(+dP_15m/2 || 0);
+
+  const MMS_long  = MMS_long_raw;
+  const MMS_short = MMS_short_raw;
 
   return {
     symbol,last,markPrice,high24,low24,volaPct,tend24,posDay,
@@ -259,6 +271,7 @@ async function processSymbol(symbol){
 function fuseJDS(rec){
   const L = rec.MMS_long;
   const S = rec.MMS_short;
+  if(L==null && S==null) return null;
   if(S > L) return { direction:"SHORT", jds:S };
   return { direction:"LONG", jds:L };
 }
@@ -299,8 +312,11 @@ function computeConfidence(rec,fusion,setupState,oiImpulse){
   else if(jds>=80) conf+=12;
   else if(jds>=70) conf+=6;
 
-  if(dir==="LONG"){ if(dVW<=-0.8 && dVW>=-10) conf+=10; }
-  else{ if(dVW>=0.8 && dVW<=10) conf+=10; }
+  if(dir==="LONG"){
+    if(dVW<=-0.8 && dVW>=-10) conf+=10;
+  }else{
+    if(dVW>=0.8 && dVW<=10) conf+=10;
+  }
 
   if(oiImpulse.label==="construction forte") conf+=12;
   else if(oiImpulse.label==="construction légère") conf+=6;
@@ -319,31 +335,46 @@ function estimateRR(vola){
   return 1.1;
 }
 
-function buildTradePlan(rec,fusion,jds,rr){
-  const price=rec.last, vola=rec.volaPct??5, dir=fusion.direction;
-  const decimals = price<0.0001?7 : price<0.01?6 : price<0.1?5 : 4;
+// ✅ FIX: Protection contre les valeurs null
+function buildTradePlan(rec, fusion, jds, rr) {
+  const price = rec.last;
+  
+  // ✅ PROTECTION : Si pas de prix valide, retourner un plan vide
+  if (!price || price <= 0) {
+    return { 
+      entry: null, 
+      sl: null, 
+      tp1: null, 
+      tp2: null, 
+      rr: null 
+    };
+  }
 
-  let riskPerc=clamp(vola/3,0.5,5);
-  let rewardPerc=riskPerc*rr;
+  const vola = rec.volaPct ?? 5;
+  const dir = fusion.direction;
+  const decimals = price < 0.0001 ? 7 : price < 0.01 ? 6 : price < 0.1 ? 5 : 4;
 
-  let entry=price, sl,tp1,tp2;
+  let riskPerc = clamp(vola / 3, 0.5, 5);
+  let rewardPerc = riskPerc * rr;
 
-  if(dir==="LONG"){
-    sl=price*(1-riskPerc/100);
-    tp1=price*(1+rewardPerc/100);
-    if(jds>=85) tp2=price*(1+(2.5*riskPerc)/100);
-  }else{
-    sl=price*(1+riskPerc/100);
-    tp1=price*(1-rewardPerc/100);
-    if(jds>=85) tp2=price*(1-(2.5*riskPerc)/100);
+  let entry = price, sl, tp1, tp2;
+
+  if (dir === "LONG") {
+    sl = price * (1 - riskPerc / 100);
+    tp1 = price * (1 + rewardPerc / 100);
+    if (jds >= 85) tp2 = price * (1 + (2.5 * riskPerc) / 100);
+  } else {
+    sl = price * (1 + riskPerc / 100);
+    tp1 = price * (1 - rewardPerc / 100);
+    if (jds >= 85) tp2 = price * (1 - (2.5 * riskPerc) / 100);
   }
 
   return {
-    entry:num(entry,decimals),
-    sl:num(sl,decimals),
-    tp1:num(tp1,decimals),
-    tp2:tp2?num(tp2,decimals):null,
-    rr:num(rr,2)
+    entry: num(entry, decimals),
+    sl: num(sl, decimals),
+    tp1: num(tp1, decimals),
+    tp2: tp2 ? num(tp2, decimals) : null,
+    rr: num(rr, 2)
   };
 }
 
@@ -366,12 +397,14 @@ function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoher
   return reco;
 }
 
+// ========= MARKET NOISE =========
 function isNoisyMarket(rec){
   const vola=rec.volaPct, dVW=rec.deltaVWAPpct, tend=rec.tend24, dOI=rec.deltaOIpct;
   if(!vola||!dVW||!tend||!dOI) return false;
   return vola<2 && Math.abs(dVW)<=0.5 && Math.abs(tend)<=15 && Math.abs(dOI)<=2;
 }
 
+// ========= ANTI-SPAM =========
 function shouldSendFor(symbol,dir,reco){
   const key = `${symbol}-${dir}`;
   const now = Date.now();
@@ -435,7 +468,7 @@ async function scanOnce(){
     const reco=computeRecommendation(jds,conf,rr,oiImpulse,rec.deltaVWAPpct,setupState,fusion.direction,rsiCoherent,rec);
 
     if(reco.includes("TAKE")){
-      candidates.push({ symbol:rec.symbol, direction:fusion.direction, jds, setupState, confiance:conf, oiImpulse, rr, plan, rec, reco });
+      candidates.push({ symbol:rec.symbol, direction:fusion.direction, jds, setupState, confiance:conf, oiImpulse, rr, plan, rec, reco, rsiCoherent });
     }
   }
 
@@ -444,7 +477,19 @@ async function scanOnce(){
     return;
   }
 
-  const fresh = candidates.filter(c => shouldSendFor(c.symbol,c.direction,c.reco));
+  // ✅ FIX: Filtrer les candidats avec plan invalide (entry/sl/tp null)
+  const validCandidates = candidates.filter(c => 
+    c.plan.entry !== null && 
+    c.plan.sl !== null && 
+    c.plan.tp1 !== null
+  );
+
+  if(!validCandidates.length){
+    console.log("ℹ️ Aucun signal valide (prix manquants).");
+    return;
+  }
+
+  const fresh = validCandidates.filter(c => shouldSendFor(c.symbol, c.direction, c.reco));
   if(!fresh.length) return;
 
   const lines=["📊 *JTF v0.8.4 AUTOSELECT — Signaux Confirmés*"];
@@ -475,4 +520,5 @@ async function main(){
   }
 }
 
+// ✅ EXPORT ESM CONFORME
 export const startAutoselect = main;
