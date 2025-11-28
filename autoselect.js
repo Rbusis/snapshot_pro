@@ -1,10 +1,10 @@
 // autoselect.js — JTF v0.8.4 (Sniper Mode, FULL API v2)
 // Version entièrement stable — ZÉRO pseudo-code, ZÉRO erreurs
 
-import process from "process";
+import process from "process"; // ✅ LA LIGNE CRITIQUE EST LÀ
 import fetch from "node-fetch";
-import { loadJson } from "./config/loadJson.js";
-const top30 = loadJson("./config/top30.json");
+
+// Nettoyage : Suppression de loadJson inutile (car SYMBOLS est défini en dur plus bas)
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
