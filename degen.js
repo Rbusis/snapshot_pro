@@ -82,19 +82,17 @@ async function safeGetJson(url){
 
 // ========= API BITGET (v2 ONLY) =========
 
-// CANDLES v2
 async function getCandles(symbol, seconds, limit=100){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`
   );
   if (!j?.data?.length) return [];
-  return j.data
-    .map(c=>({ t:+c[0],o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5] }))
-    .sort((a,b)=>a.t-b.t);
+  return j.data.map(c => ({
+    t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
+  })).sort((a,b)=>a.t-b.t);
 }
 
-// TICKER v2
 async function getTicker(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -103,7 +101,6 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-// FUNDING v2
 async function getFunding(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -112,7 +109,6 @@ async function getFunding(symbol){
   return j?.data ?? null;
 }
 
-// DEPTH v2
 async function getDepth(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -121,7 +117,6 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// FULL MARKET TICKERS v2
 async function fetchAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -147,19 +142,16 @@ async function updateDegenList(){
 
     const discovery = getDiscoveryList();
 
-    // Filtrage strict
     let valid = all.filter(t =>
       t.symbol.endsWith("_UMCBL") &&
       (+t.usdtVolume > 3_000_000) &&
       !IGNORE_LIST.includes(t.symbol)
     );
 
-    // Tri par volume
     valid.sort((a,b)=>(+b.usdtVolume) - (+a.usdtVolume));
 
     let lowCaps = valid.map(t=>t.symbol);
 
-    // Exclure Top30 + Discovery
     lowCaps = lowCaps.filter(sym =>
       !top30.includes(sym) &&
       !discovery.includes(sym)
@@ -178,12 +170,10 @@ async function updateDegenList(){
 
 // ========= INDICATEURS =========
 
-// RSI classique
 function rsi(values, period = 14) {
   if (!values || values.length < period + 1) return null;
 
-  let gains = 0;
-  let losses = 0;
+  let gains = 0, losses = 0;
 
   for (let i = 1; i <= period; i++) {
     const diff = values[i] - values[i - 1];
@@ -192,7 +182,7 @@ function rsi(values, period = 14) {
   }
 
   gains /= period;
-  losses = (losses / period) || 1e-9;  // éviter division 0
+  losses = (losses / period) || 1e-9;
 
   let rs = gains / losses;
   let rsi = 100 - 100 / (1 + rs);
@@ -200,7 +190,7 @@ function rsi(values, period = 14) {
   for (let i = period + 1; i < values.length; i++) {
     const diff = values[i] - values[i - 1];
     gains = (gains * (period - 1) + Math.max(diff, 0)) / period;
-    losses = (losses * (period - 1) + Math.max(-diff, 0)) / period || 1e-9;
+    losses = ((losses * (period - 1) + Math.max(-diff, 0)) / period) || 1e-9;
     rs = gains / losses;
     rsi = 100 - 100 / (1 + rs);
   }
@@ -208,11 +198,8 @@ function rsi(values, period = 14) {
   return rsi;
 }
 
-// VWAP
 function vwap(candles) {
-  if (!candles || !candles.length) return null;
-  let pv = 0;
-  let vol = 0;
+  let pv = 0, vol = 0;
   for (const c of candles) {
     const price = (c.h + c.l + c.c) / 3;
     pv += price * c.v;
@@ -221,17 +208,16 @@ function vwap(candles) {
   return vol ? pv / vol : null;
 }
 
-// Taille des mèches (%)
 function calcWicks(candle) {
   if (!candle) return { upper: 0, lower: 0 };
 
   const top = Math.max(candle.o, candle.c);
   const bottom = Math.min(candle.o, candle.c);
 
-  const upper = ((candle.h - top) / candle.c) * 100;
-  const lower = ((bottom - candle.l) / candle.c) * 100;
-
-  return { upper, lower };
+  return {
+    upper: ((candle.h - top) / candle.c) * 100,
+    lower: ((bottom - candle.l) / candle.c) * 100
+  };
 }
 
 // ========= PROCESS PAIRE =========
@@ -271,16 +257,16 @@ async function processDegen(symbol){
 
   const lastVol = currentCandle.v;
   const avgVol = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
-  const volRatio = avgVol>0 ? lastVol/avgVol : 1;
+  const volRatio = avgVol > 0 ? lastVol / avgVol : 1;
 
-  let obScore=0, bidsVol=0, asksVol=0;
-  if (depth){
+  let obScore = 0, bidsVol=0, asksVol=0;
+  if (depth) {
     bidsVol = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     asksVol = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
-    if (asksVol>0){
-      const r = bidsVol/asksVol;
-      if (r>1.25) obScore=1;
-      else if (r<0.75) obScore=-1;
+    if (asksVol > 0) {
+      const r = bidsVol / asksVol;
+      if (r > 1.25) obScore = 1;
+      else if (r < 0.75) obScore = -1;
     }
   }
 
@@ -290,27 +276,169 @@ async function processDegen(symbol){
   };
 }
 
-// ========= ANALYSE SNIPER v1.1 =========
+// ========= ANALYZE CANDIDATE (FULL VERSION) =========
 
-function analyzeCandidate(rec, btc){ ... }  // UNCHANGED
+function analyzeCandidate(rec, btcChange) {
+  if (!rec || btcChange == null || isNaN(btcChange)) return null;
+  if (rec.volaPct == null) return null;
 
-// ========= TELEGRAM & SPAM =========
+  const vola = rec.volaPct;
+  const volRatio = rec.volRatio;
+  const gapAbs = Math.abs(rec.priceVsVwap);
 
-async function sendTelegram(text){ ... }  // unchanged
+  // HARD FILTERS
+  if (volRatio < 3.5) return null;
+  if (vola < 4 || vola > 25) return null;
+  if (gapAbs < 1.0 || gapAbs > 3.5) return null;
 
-function checkAntiSpam(symbol,dir){ ... } // unchanged
+  const absBTC = Math.abs(btcChange);
+  if (absBTC < BTC_TREND_ABS_MIN || absBTC > BTC_TREND_ABS_MAX) return null;
+
+  let direction = null;
+  if (rec.priceVsVwap > 0) direction = "LONG";
+  else if (rec.priceVsVwap < 0) direction = "SHORT";
+  else return null;
+
+  if (rec.rsi5 == null || rec.rsi15 == null) return null;
+
+  const r5 = rec.rsi5;
+  const r15 = rec.rsi15;
+
+  const wU = rec.wicks.upper;
+  const wL = rec.wicks.lower;
+
+  const obScore = rec.obScore;
+
+  // Direction filters
+  if (direction === "LONG") {
+    if (btcChange < BTC_LONG_MIN || btcChange > BTC_LONG_MAX) return null;
+    if (r5 < 50 || r5 > 75) return null;
+    if (r15 < 45 || r15 > 70) return null;
+    if (wU > 1.2) return null;
+    if (obScore < 0) return null;
+  } else {
+    if (btcChange > BTC_SHORT_MAX || btcChange < BTC_SHORT_MIN) return null;
+    if (r5 < 25 || r5 > 50) return null;
+    if (r15 < 30 || r15 > 55) return null;
+    if (wL > 1.2) return null;
+    if (obScore > 0) return null;
+  }
+
+  // SCORE 0–100
+  let score = 0;
+
+  score += clamp(10 + (volRatio - 3.5) * 8, 0, 30);
+
+  let scoreGap = 5;
+  if (gapAbs >= 1.2 && gapAbs <= 2.4) scoreGap = 20;
+  else if (gapAbs > 2.4 && gapAbs <= 3.5) scoreGap = 12;
+  score += scoreGap;
+
+  let scoreRsi = 0;
+  if (direction === "LONG") {
+    if (r5 >= 55 && r5 <= 70 && r15 >= 50 && r15 <= 65) scoreRsi = 15;
+    else if (r5 > 50 && r15 > 45) scoreRsi = 7;
+  } else {
+    if (r5 >= 30 && r5 <= 45 && r15 >= 35 && r15 <= 50) scoreRsi = 15;
+    else if (r5 < 50 && r15 < 55) scoreRsi = 7;
+  }
+  score += scoreRsi;
+
+  let scoreOB = 0;
+  const obRatio = rec.asksVol > 0 ? rec.bidsVol / rec.asksVol : 1;
+
+  if (direction === "LONG") {
+    if (obScore === 1 && obRatio >= 1.3) scoreOB = 15;
+    else if (obScore === 1) scoreOB = 8;
+  } else {
+    if (obScore === -1 && obRatio <= 0.77) scoreOB = 15;
+    else if (obScore === -1) scoreOB = 8;
+  }
+  score += scoreOB;
+
+  let scoreTrend = 0;
+  const ch24 = rec.change24;
+
+  if (direction === "LONG") {
+    if (ch24 > 8) scoreTrend = 10;
+    else if (ch24 > 4) scoreTrend = 6;
+  } else {
+    if (ch24 < -8) scoreTrend = 10;
+    else if (ch24 < -4) scoreTrend = 6;
+  }
+  score += scoreTrend;
+
+  let scoreBTC = 0;
+  if (direction === "LONG") {
+    if (btcChange >= 0.5 && btcChange <= 1.8) scoreBTC = 10;
+    else if (btcChange >= 0.2 && btcChange <= 2.0) scoreBTC = 6;
+  } else {
+    if (btcChange <= -0.5 && btcChange >= -1.8) scoreBTC = 10;
+    else if (btcChange <= -0.2 && btcChange >= -2.0) scoreBTC = 6;
+  }
+  score += scoreBTC;
+
+  if (direction === "LONG") {
+    if (wU < 0.6) score += 5;
+    else if (wU > 1.0) score -= 5;
+  } else {
+    if (wL < 0.6) score += 5;
+    else if (wL > 1.0) score -= 5;
+  }
+
+  const DEGEN_SCORE = clamp(Math.round(score), 0, 100);
+  if (DEGEN_SCORE < 88) return null;
+
+  return {
+    symbol: rec.symbol,
+    direction,
+    score: DEGEN_SCORE,
+    volRatio: rec.volRatio,
+    vola: rec.volaPct,
+    priceVsVwap: rec.priceVsVwap,
+    last: rec.last
+  };
+}
+
+// ========= TELEGRAM =========
+
+async function sendTelegram(text){
+  if(!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try{
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "Markdown"
+      })
+    });
+  }catch(e){
+    console.error("Telegram error:", e?.message || e);
+  }
+}
+
+function checkAntiSpam(symbol, direction){
+  const key = `${symbol}-${direction}`;
+  const now = Date.now();
+  if (lastAlerts.get(key) && now - lastAlerts.get(key) < MIN_ALERT_DELAY_MS)
+    return false;
+  lastAlerts.set(key, now);
+  return true;
+}
 
 // ========= MAIN LOOP =========
 
 async function scanDegen(){
   const now = Date.now();
   const btcChange = await getBTCTrend();
-  if (btcChange==null || isNaN(btcChange)){
+  if (btcChange == null || isNaN(btcChange)){
     console.log("⚠️ BTC DATA ERROR.");
     return;
   }
 
-  if (now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
+  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS = await updateDegenList();
     lastSymbolUpdate = now;
   }
@@ -335,13 +463,12 @@ async function scanDegen(){
     return;
   }
 
-  // best shot
   const best = candidates.sort((a,b)=>{
-    if (b.score!==a.score) return b.score-a.score;
-    return (+b.volRatio)-(+a.volRatio);
+    if (b.score !== a.score) return b.score - a.score;
+    return (+b.volRatio) - (+a.volRatio);
   })[0];
 
-  if ((now-lastGlobalTradeTime) < GLOBAL_COOLDOWN_MS){
+  if ((now - lastGlobalTradeTime) < GLOBAL_COOLDOWN_MS){
     console.log(`⏳ Cooldown : signal ${best.symbol} ignoré.`);
     return;
   }
@@ -351,9 +478,21 @@ async function scanDegen(){
     return;
   }
 
-  // SEND SIGNAL
-  const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
-  const msg = `🎯 *DEGEN v1.1 (API v2)*\n\n${emoji} *${best.symbol}* — ${best.direction}\n...`;
+  const emoji = best.direction === "LONG" ? "🔫🟢" : "🔫🔴";
+
+  const msg =
+`🎯 *DEGEN v1.1 (API v2)*
+
+${emoji} *${best.symbol}* — ${best.direction}
+🏅 *Score:* ${best.score}/100
+
+📊 *Vol Spike:* x${best.volRatio}
+🌡️ *Vola24:* ${best.vola}%
+📉 *ΔVWAP:* ${num(best.priceVsVwap,2)}%
+
+💰 *Prix:* ${best.last}
+
+_Wait for limit. No FOMO._`;
 
   await sendTelegram(msg);
   console.log(`✅ SHOT : ${best.symbol}`);
