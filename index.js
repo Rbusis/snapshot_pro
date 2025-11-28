@@ -1,41 +1,55 @@
 import http from 'http';
-import { fork } from 'child_process'; // Module natif Node pour lancer des processus séparés
+import { spawn } from 'child_process';
+import process from 'process';
 
-// 1. CONFIGURATION DU SERVEUR (Pour Railway)
+// --- CONFIGURATION RAILWAY ---
 const PORT = process.env.PORT || 8080;
 
+// 1. Démarrage du "Faux Serveur" pour satisfaire Railway
 const server = http.createServer((req, res) => {
+    // On logue chaque ping pour vérifier que Railway nous parle
+    console.log(`Ping reçu de Railway: ${req.method} ${req.url}`);
     res.writeHead(200);
-    res.end('JTF Controller is Online');
+    res.end('JTF Bot Controller is Active.');
 });
 
-// 2. DÉMARRAGE DU SERVEUR (Immédiat)
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ CONTENEUR STABILISÉ sur le port ${PORT}`);
-    console.log(`🚀 Lancement des processus de trading en parallèle...`);
+    console.log(`✅ SERVEUR WEB EN LIGNE (Port ${PORT})`);
+    console.log(`⏳ Attente de 10 secondes avant de lancer le trading pour validation Railway...`);
 
-    // 3. LANCEMENT ISOLÉ DES BOTS
-    // Si un bot crash, il ne tue pas le conteneur principal
-    lancerBot('./degen.js', 'DEGEN');
-    lancerBot('./autoselect.js', 'AUTOSELECT');
+    // 2. On attend que Railway valide le conteneur AVANT de lancer quoi que ce soit de lourd
+    setTimeout(() => {
+        console.log("🚀 DÉMARRAGE DES BOTS MAINTENANT...");
+        startProcess('./degen.js', 'DEGEN');
+        startProcess('./autoselect.js', 'AUTOSELECT');
+    }, 10000); // 10 secondes de délai
 });
 
-function lancerBot(scriptPath, nom) {
-    // On utilise "fork" pour créer un processus enfant indépendant
-    const child = fork(scriptPath);
+// Système de "Keep-Alive" pour prouver que le script ne plante pas
+setInterval(() => {
+    console.log("💓 Heartbeat: Le processus principal est vivant...");
+}, 5000);
 
-    child.on('spawn', () => {
-        console.log(`🔹 Processus ${nom} démarré avec succès (PID: ${child.pid})`);
+// --- FONCTION DE LANCEMENT ROBUSTE ---
+function startProcess(scriptPath, label) {
+    // On utilise 'spawn' qui est plus détaché que 'fork'
+    // Cela évite que le bot ne partage la même mémoire que le serveur web
+    const child = spawn('node', [scriptPath], {
+        stdio: 'inherit', // On redirige les logs du bot vers la console principale
+        env: process.env  // On passe les variables d'environnement (API KEYS)
     });
 
     child.on('error', (err) => {
-        console.error(`❌ Erreur critique sur ${nom}:`, err.message);
+        console.error(`❌ ERREUR CRITIQUE sur ${label}:`, err.message);
     });
 
     child.on('exit', (code) => {
-        if (code !== 0) {
-            console.error(`⚠️ ${nom} s'est arrêté (Code: ${code}). Le serveur reste en ligne.`);
-            // Optionnel : On peut redémarrer le bot automatiquement ici si on veut
-        }
+        console.log(`⚠️ ${label} s'est arrêté (Code ${code}). Le serveur web reste en ligne.`);
+        // Optionnel: Relancer le bot automatiquement
+        // setTimeout(() => startProcess(scriptPath, label), 5000); 
     });
 }
+
+// Gestion des crashs globaux pour ne JAMAIS fermer le conteneur
+process.on('uncaughtException', (err) => console.error('🔥 CRASH GLOBAL EVITÉ :', err));
+process.on('unhandledRejection', (reason) => console.error('🔥 PROMESSE REJETÉE :', reason));
