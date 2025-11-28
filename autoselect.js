@@ -1,6 +1,7 @@
 // autoselect.js — JTF v0.8.4 (Sniper Mode, FULL API v2)
 // Version entièrement stable — ZÉRO pseudo-code, ZÉRO erreurs
 
+import process from "process";
 import fetch from "node-fetch";
 import { loadJson } from "./config/loadJson.js";
 const top30 = loadJson("./config/top30.json");
