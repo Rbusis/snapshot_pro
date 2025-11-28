@@ -1,57 +1,35 @@
-// index.js — CHEF D'ORCHESTRE ULTIME (Staggered Launch v1.0)
-// Lance le serveur Web + 5 Bots avec décalages intelligents
-// Objectif : éviter tout appel API simultané → zéro rate-limit Bitget
+// index.js — CHEF D'ORCHESTRE ULTIME (Sans MQI)
+// Lance le serveur Web + 4 Bots : Autoselect, Discovery, Degen, Swing
 
 import http from "http";
 import { startAutoselect } from "./autoselect.js";
 import { startDiscovery } from "./discovery.js";
 import { startDegen } from "./degen.js";
 import { startSwing } from "./swing.js";
-import { startMQI } from "./mqi.js";
 
-// ========= KEEPALIVE RAILWAY =========
+// ========= RAILWAY KEEPALIVE =========
 const PORT = process.env.PORT || 8080;
 http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("🤖 JTF PENTA-BOT RUNNING (Autoselect + Discovery + Degen + Swing + MQI)");
+  res.end("🤖 JTF QUAD-BOT IS RUNNING (Autoselect + Discovery + Degen + Swing)");
 }).listen(PORT, () => {
-  console.log(`🛡️ Serveur Global sur port ${PORT}`);
+  console.log(`🛡️ Serveur Global écoute sur le port ${PORT}`);
 });
 
-// ========= LANCEMENT DES BOTS AVEC DÉCALAGE =========
-// Pourquoi ? → éviter que tous les bots fassent 150 requêtes simultanées
-// Chaque bot démarre à un moment différent → charge répartie → zéro erreur API
+// ========= LANCEMENT DES MOTEURS =========
 
 console.log("🏁 Démarrage orchestré de la flotte JTF…");
 
-// Helper pour attendre
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+// 1) Bot Top 30 (Autoselect)
+startAutoselect().catch(e => console.error("❌ CRASH Autoselect:", e));
 
-async function launchBots() {
+// 2) Bot Mid-Caps (Discovery)
+startDiscovery().catch(e => console.error("❌ CRASH Discovery:", e));
 
-  // 1. Autoselect (TOP 30) — priorité max
-  startAutoselect().catch(e => console.error("❌ CRASH Autoselect:", e));
-  console.log("🚀 Autoselect démarré (t=0s)");
+// 3) Bot Low-Caps (Degen)
+startDegen().catch(e => console.error("❌ CRASH Degen:", e));
 
-  // 2. Discovery — décalage 20 sec
-  await sleep(20_000);
-  startDiscovery().catch(e => console.error("❌ CRASH Discovery:", e));
-  console.log("🚀 Discovery démarré (t=+20s)");
+// 4) Bot Swing Trading (Swing)
+startSwing().catch(e => console.error("❌ CRASH Swing:", e));
 
-  // 3. Degen — décalage 40 sec
-  await sleep(20_000);
-  startDegen().catch(e => console.error("❌ CRASH Degen:", e));
-  console.log("🚀 Degen démarré (t=+40s)");
-
-  // 4. Swing — décalage 60 sec
-  await sleep(20_000);
-  startSwing().catch(e => console.error("❌ CRASH Swing:", e));
-  console.log("🚀 Swing démarré (t=+60s)");
-
-  // 5. MQI — décalage 120 sec (indépendant + faible fréquence)
-  await sleep(60_000);
-  startMQI().catch(e => console.error("❌ CRASH MQI:", e));
-  console.log("🚀 MQI démarré (t=+120s)");
-}
-
-launchBots();
+console.log("🚀 Bots JTF (4 moteurs) opérationnels. MQI retiré.");
