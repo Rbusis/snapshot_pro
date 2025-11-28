@@ -178,9 +178,61 @@ async function updateDegenList(){
 
 // ========= INDICATEURS =========
 
-function rsi(c,p=14){ ... }   // UNCHANGED
-function vwap(c){ ... }       // UNCHANGED
-function calcWicks(c){ ... }  // UNCHANGED
+// RSI classique
+function rsi(values, period = 14) {
+  if (!values || values.length < period + 1) return null;
+
+  let gains = 0;
+  let losses = 0;
+
+  for (let i = 1; i <= period; i++) {
+    const diff = values[i] - values[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses -= diff;
+  }
+
+  gains /= period;
+  losses = (losses / period) || 1e-9;  // éviter division 0
+
+  let rs = gains / losses;
+  let rsi = 100 - 100 / (1 + rs);
+
+  for (let i = period + 1; i < values.length; i++) {
+    const diff = values[i] - values[i - 1];
+    gains = (gains * (period - 1) + Math.max(diff, 0)) / period;
+    losses = (losses * (period - 1) + Math.max(-diff, 0)) / period || 1e-9;
+    rs = gains / losses;
+    rsi = 100 - 100 / (1 + rs);
+  }
+
+  return rsi;
+}
+
+// VWAP
+function vwap(candles) {
+  if (!candles || !candles.length) return null;
+  let pv = 0;
+  let vol = 0;
+  for (const c of candles) {
+    const price = (c.h + c.l + c.c) / 3;
+    pv += price * c.v;
+    vol += c.v;
+  }
+  return vol ? pv / vol : null;
+}
+
+// Taille des mèches (%)
+function calcWicks(candle) {
+  if (!candle) return { upper: 0, lower: 0 };
+
+  const top = Math.max(candle.o, candle.c);
+  const bottom = Math.min(candle.o, candle.c);
+
+  const upper = ((candle.h - top) / candle.c) * 100;
+  const lower = ((bottom - candle.l) / candle.c) * 100;
+
+  return { upper, lower };
+}
 
 // ========= PROCESS PAIRE =========
 
