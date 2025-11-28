@@ -1,58 +1,43 @@
 import http from 'http';
 import process from 'process';
 
-// --- IMPORTS DES MODULES ---
-// Utilise try/catch pour ne pas tout planter si un fichier manque
-async function loadBot(name, path) {
+// Fonction simple pour charger les modules sans planter
+async function startBot(name, path) {
     try {
+        console.log(`⏳ Chargement de ${name}...`);
         const module = await import(path);
-        if (module.default) module.default(); // Si export default
-        else if (module.startDegen) module.startDegen(); // Cas spécifique degen
-        else if (module.startAutoselect) module.startAutoselect(); // Cas spécifique autoselect
-        // Ajoute ici d'autres noms de fonctions si besoin (ex: startDiscovery)
-        else {
-            // Tente de lancer la première fonction exportée trouvée
-            const keys = Object.keys(module);
-            if (keys.length > 0 && typeof module[keys[0]] === 'function') {
-                module[keys[0]]();
-            }
-        }
-        console.log(`✅ ${name} lancé.`);
+        
+        // Lance la fonction de démarrage trouvée
+        if (module.startDegen) module.startDegen();
+        else if (module.startAutoselect) module.startAutoselect();
+        else if (module.default) module.default();
+        
+        console.log(`✅ ${name} DÉMARRÉ.`);
     } catch (e) {
-        console.error(`⚠️ Impossible de lancer ${name} :`, e.message);
+        console.error(`❌ ÉCHEC ${name}:`, e.message);
     }
 }
 
-// --- 1. SERVEUR HTTP (CRITIQUE POUR RAILWAY) ---
-const requestListener = function (req, res) {
-  res.writeHead(200);
-  res.end('JTF Bot is running!');
-};
+// --- CONFIGURATION DU SERVEUR (CRITIQUE) ---
+const PORT = process.env.PORT || 8080;
+const HOST = '0.0.0.0'; // <--- LA CLÉ EST ICI (Force l'écoute publique pour Railway)
 
-const port = process.env.PORT || 8080;
-const server = http.createServer(requestListener);
-
-server.listen(port, () => {
-    console.log(`🌍 Serveur HTTP écoutant sur le port ${port} (Requis pour Railway)`);
-    
-    // --- 2. LANCEMENT DES BOTS ---
-    console.log("🚀 Démarrage des modules JTF...");
-
-    // Lance les bots sans bloquer le thread principal
-    loadBot("DEGEN Sniper", "./degen.js");
-    loadBot("AUTOSELECT", "./autoselect.js");
-    
-    // Si tu as discovery.js ou swing.js, décommente :
-    // loadBot("DISCOVERY", "./discovery.js");
-    // loadBot("SWING", "./swing.js");
+const server = http.createServer((req, res) => {
+    // Répond toujours 200 OK pour que Railway soit content
+    res.writeHead(200);
+    res.end('JTF Bot is running OK.');
 });
 
-// --- GESTION DES ERREURS GLOBALES ---
-process.on('uncaughtException', (err) => {
-    console.error('🔥 CRASH NON GÉRÉ :', err);
-    // On ne quitte PAS le process pour garder le conteneur vivant
+// --- DÉMARRAGE ---
+server.listen(PORT, HOST, () => {
+    console.log(`🌍 SERVEUR HTTP OK : http://${HOST}:${PORT}`);
+    console.log("🚀 Lancement des algorithmes de trading...");
+
+    // Lance tes deux bots
+    startBot("DEGEN Sniper", "./degen.js");
+    startBot("AUTOSELECT", "./autoselect.js");
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('🔥 PROMESSE REJETÉE :', reason);
-});
+// --- ANTI-CRASH ---
+process.on('uncaughtException', (err) => console.error('🔥 CRASH :', err));
+process.on('unhandledRejection', (reason) => console.error('🔥 REJET :', reason));
