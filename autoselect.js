@@ -1,10 +1,8 @@
 // autoselect.js — JTF v0.8.4 (Sniper Mode, FULL API v2)
-// Version entièrement stable — ZÉRO pseudo-code, ZÉRO erreurs
+// Version stable — corrections prix + sécurité NaN + skip tokens invalides
 
-import process from "process"; // ✅ LA LIGNE CRITIQUE EST LÀ
+import process from "process";
 import fetch from "node-fetch";
-
-// Nettoyage : Suppression de loadJson inutile (car SYMBOLS est défini en dur plus bas)
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -12,7 +10,6 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS   = 5 * 60_000;
 const MIN_ALERT_DELAY_MS = 3 * 60_000;
-const VALIDATION_DELAY_MS = 0;
 
 // 30 paires futures USDT perp Bitget
 const SYMBOLS = [
@@ -25,8 +22,6 @@ const SYMBOLS = [
 ];
 
 // ========= LIMITES =========
-const MIN_JDS_TRADE_NOW   = 65;
-const MIN_JDS_WAIT_ENTRY  = 45;
 const MAX_OI_FOR_SHORT_OK =  0.6;
 const MIN_OI_FOR_LONG_OK  = -0.6;
 
@@ -52,11 +47,10 @@ async function safeGetJson(url){
 
 async function getTicker(symbol){
   const base = baseSymbol(symbol);
-  return (
-    await safeGetJson(
-      `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${base}&productType=usdt-futures`
-    )
-  )?.data ?? null;
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${base}&productType=usdt-futures`
+  );
+  return j?.data ?? null;
 }
 
 async function getMarkPrice(symbol){
@@ -64,14 +58,9 @@ async function getMarkPrice(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/mark-price?symbol=${base}&productType=usdt-futures`
   );
-
   if (!j?.data) return null;
-
-  return j.data.markPrice
-    ? +j.data.markPrice
-    : j.data.indexPrice
-    ? +j.data.indexPrice
-    : null;
+  return j.data.markPrice ? +j.data.markPrice :
+         j.data.indexPrice ? +j.data.indexPrice : null;
 }
 
 async function getDepth(symbol){
@@ -90,20 +79,18 @@ async function getDepth(symbol){
 
 async function getFunding(symbol){
   const base = baseSymbol(symbol);
-  return (
-    await safeGetJson(
-      `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${base}&productType=usdt-futures`
-    )
-  )?.data ?? null;
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${base}&productType=usdt-futures`
+  );
+  return j?.data ?? null;
 }
 
 async function getOI(symbol){
   const base = baseSymbol(symbol);
-  return (
-    await safeGetJson(
-      `https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${base}&productType=usdt-futures`
-    )
-  )?.data ?? null;
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${base}&productType=usdt-futures`
+  );
+  return j?.data ?? null;
 }
 
 async function getCandles(symbol, seconds, limit=200){
@@ -118,7 +105,6 @@ async function getCandles(symbol, seconds, limit=200){
 }
 
 // ========= INDICATEURS =========
-
 function percent(a,b){ return b ? (a/b -1)*100 : null; }
 
 function rsi(closes,p=14){
@@ -179,7 +165,17 @@ async function processSymbol(symbol){
 
   if(!tk) return null;
 
-  const last = tk.lastPr ? +tk.lastPr : (tk.markPrice ? +tk.markPrice : (tk.last ? +tk.last : null));  const high24 = +tk.high24h;
+  // -------- FIX PRIX COMPLET --------
+  const rawPrice = tk.lastPr ?? tk.markPrice ?? tk.last ?? null;
+  const last = rawPrice !== null ? +rawPrice : null;
+
+  if (last === null || isNaN(last) || last === 0) {
+    console.log(`⚠️ Skip ${symbol} — prix invalide`);
+    return null;
+  }
+  // ----------------------------------
+
+  const high24 = +tk.high24h;
   const low24  = +tk.low24h;
 
   const openInterest = oi ? +oi.amount : null;
@@ -230,16 +226,11 @@ async function processSymbol(symbol){
   const dP_5m  = closeChange(c5m);
   const dP_15m = closeChange(c15m);
 
-  const volaPct = (last && high24 && low24)
-    ? ((high24-low24)/last)*100
-    : null;
+  const volaPct = ((high24-low24)/last)*100;
+  const tend24  = (((last-low24)/(high24-low24))*200 -100);
+  const posDay  = positionInDay(last,low24,high24);
 
-  const tend24 = (high24>low24 && last)
-    ? (((last-low24)/(high24-low24))*200 -100)
-    : null;
-
-  const posDay = positionInDay(last,low24,high24);
-  const vwap1h = vwap(c1h.slice(-48));
+  const vwap1h  = vwap(c1h.slice(-48));
   const deltaVWAP = vwap1h? percent(last,vwap1h) : null;
 
   const vwap4h = vwap(c4h.slice(-48));
@@ -249,11 +240,8 @@ async function processSymbol(symbol){
 
   const fundingRate = fr ? +fr.fundingRate*100 : null;
 
-  const MMS_long_raw  = toScore100(-dP_15m/2 || 0);
-  const MMS_short_raw = toScore100(+dP_15m/2 || 0);
-
-  const MMS_long  = MMS_long_raw;
-  const MMS_short = MMS_short_raw;
+  const MMS_long  = toScore100(-(dP_15m/2) || 0);
+  const MMS_short = toScore100( +(dP_15m/2) || 0);
 
   return {
     symbol,last,markPrice,high24,low24,volaPct,tend24,posDay,
@@ -271,7 +259,6 @@ async function processSymbol(symbol){
 function fuseJDS(rec){
   const L = rec.MMS_long;
   const S = rec.MMS_short;
-  if(L==null && S==null) return null;
   if(S > L) return { direction:"SHORT", jds:S };
   return { direction:"LONG", jds:L };
 }
@@ -312,11 +299,8 @@ function computeConfidence(rec,fusion,setupState,oiImpulse){
   else if(jds>=80) conf+=12;
   else if(jds>=70) conf+=6;
 
-  if(dir==="LONG"){
-    if(dVW<=-0.8 && dVW>=-10) conf+=10;
-  }else{
-    if(dVW>=0.8 && dVW<=10) conf+=10;
-  }
+  if(dir==="LONG"){ if(dVW<=-0.8 && dVW>=-10) conf+=10; }
+  else{ if(dVW>=0.8 && dVW<=10) conf+=10; }
 
   if(oiImpulse.label==="construction forte") conf+=12;
   else if(oiImpulse.label==="construction légère") conf+=6;
@@ -382,14 +366,12 @@ function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoher
   return reco;
 }
 
-// ========= MARKET NOISE =========
 function isNoisyMarket(rec){
   const vola=rec.volaPct, dVW=rec.deltaVWAPpct, tend=rec.tend24, dOI=rec.deltaOIpct;
   if(!vola||!dVW||!tend||!dOI) return false;
   return vola<2 && Math.abs(dVW)<=0.5 && Math.abs(tend)<=15 && Math.abs(dOI)<=2;
 }
 
-// ========= ANTI-SPAM =========
 function shouldSendFor(symbol,dir,reco){
   const key = `${symbol}-${dir}`;
   const now = Date.now();
@@ -453,7 +435,7 @@ async function scanOnce(){
     const reco=computeRecommendation(jds,conf,rr,oiImpulse,rec.deltaVWAPpct,setupState,fusion.direction,rsiCoherent,rec);
 
     if(reco.includes("TAKE")){
-      candidates.push({ symbol:rec.symbol, direction:fusion.direction, jds, setupState, confiance:conf, oiImpulse, rr, plan, rec, reco, rsiCoherent });
+      candidates.push({ symbol:rec.symbol, direction:fusion.direction, jds, setupState, confiance:conf, oiImpulse, rr, plan, rec, reco });
     }
   }
 
