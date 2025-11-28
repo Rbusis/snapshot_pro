@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v1.1 Ultra-Sniper (API v2 ONLY)
+// degen.js — JTF DEGEN v1.1 Ultra-Sniper (API v2 FIXED)
 // Lowcaps Momentum Sniper — très peu de signaux, mais "balles en or".
 
 import fetch from "node-fetch";
@@ -7,18 +7,21 @@ import fs from "fs";
 // ========= LOAD JSON =========
 
 function loadJson(path) {
-  return JSON.parse(fs.readFileSync(path, "utf8"));
+  try {
+    if (fs.existsSync(path)) {
+      return JSON.parse(fs.readFileSync(path, "utf8"));
+    }
+  } catch (e) {
+    console.error(`⚠️ Erreur lecture ${path}:`, e.message);
+  }
+  return []; // Retourne un tableau vide par défaut si erreur ou pas de fichier
 }
 
+// Assure-toi que ces fichiers existent ou que la fonction gère le vide
 const top30 = loadJson("./config/top30.json");
 
 function getDiscoveryList() {
-  try {
-    return loadJson("./config/discovery_list.json");
-  } catch (e) {
-    console.log("⚠️ discovery_list.json introuvable — fallback []");
-    return [];
-  }
+  return loadJson("./config/discovery_list.json");
 }
 
 // ========= CONFIG =========
@@ -39,6 +42,16 @@ const BTC_LONG_MIN  = 0.2;
 const BTC_LONG_MAX  = 2.0;
 const BTC_SHORT_MIN = -2.0;
 const BTC_SHORT_MAX = -0.2;
+
+// Mapping Granularity pour Bitget API v2
+const TIME_MAP = {
+  60: "1m",
+  300: "5m",
+  900: "15m",
+  3600: "1H",
+  14400: "4H",
+  86400: "1D"
+};
 
 // ========= STATE =========
 
@@ -68,11 +81,15 @@ const IGNORE_LIST = [
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
+
+// Nettoie le symbole pour les appels API qui demandent la base (ex: BTCUSDT)
 const baseSymbol = s => s.replace("_UMCBL","");
+// Assure le format interne (ex: BTCUSDT_UMCBL)
+const formatSymbol = s => s.endsWith("_UMCBL") ? s : `${s}_UMCBL`;
 
 async function safeGetJson(url){
   try {
-    const r = await fetch(url, { headers:{ Accept:"application/json" } });
+    const r = await fetch(url, { headers:{ Accept:"application/json" }, timeout: 5000 });
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -84,10 +101,15 @@ async function safeGetJson(url){
 
 async function getCandles(symbol, seconds, limit=100){
   const base = baseSymbol(symbol);
+  // Conversion explicite secondes -> string pour API v2
+  const granularity = TIME_MAP[seconds] || "5m"; 
+
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&productType=usdt-futures&limit=${limit}`
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${granularity}&productType=usdt-futures&limit=${limit}`
   );
   if (!j?.data?.length) return [];
+  
+  // Format v2 : [ts, o, h, l, c, vol(base), vol(quote)...]
   return j.data.map(c => ({
     t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
   })).sort((a,b)=>a.t-b.t);
@@ -98,6 +120,8 @@ async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${base}&productType=usdt-futures`
   );
+  // Endpoint ticker renvoie un objet ou un tableau selon le endpoint exact, ici on attend data[0] ou data
+  if (Array.isArray(j?.data)) return j.data[0];
   return j?.data ?? null;
 }
 
@@ -106,6 +130,8 @@ async function getFunding(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${base}&productType=usdt-futures`
   );
+  // Parfois data est un tableau, parfois un objet
+  if (Array.isArray(j?.data)) return j.data[0];
   return j?.data ?? null;
 }
 
@@ -127,7 +153,8 @@ async function fetchAllTickers(){
 // ========= BTC TREND =========
 
 async function getBTCTrend() {
-  const candles = await getCandles("BTCUSDT_UMCBL",3600,5);
+  // Utilise 3600s -> '1H' via TIME_MAP
+  const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
   if (!candles || candles.length < 2) return null;
   const last = candles[candles.length-1];
   return ((last.c - last.o)/last.o)*100;
@@ -142,21 +169,32 @@ async function updateDegenList(){
 
     const discovery = getDiscoveryList();
 
-    let valid = all.filter(t =>
-      t.symbol.endsWith("_UMCBL") &&
-      (+t.usdtVolume > 3_000_000) &&
-      !IGNORE_LIST.includes(t.symbol)
-    );
+    // Filtre et normalisation
+    let valid = all.filter(t => {
+      // Vérif si USDT
+      const isUSDT = t.symbol.includes("USDT");
+      // Volume > 3M
+      const hasVol = (+t.usdtVolume > 3_000_000);
+      
+      // Reconstruction du nom complet pour check IGNORE_LIST
+      const fullSym = formatSymbol(t.symbol);
+      
+      return isUSDT && hasVol && !IGNORE_LIST.includes(fullSym);
+    });
 
+    // Tri par volume
     valid.sort((a,b)=>(+b.usdtVolume) - (+a.usdtVolume));
 
-    let lowCaps = valid.map(t=>t.symbol);
+    // Conversion en tableau de strings normalisées
+    let lowCaps = valid.map(t => formatSymbol(t.symbol));
 
+    // Exclusion Top30 et Discovery
     lowCaps = lowCaps.filter(sym =>
       !top30.includes(sym) &&
       !discovery.includes(sym)
     );
 
+    // On garde le top 30 des "non-top30"
     lowCaps = lowCaps.slice(0,30);
 
     console.log(`🔄 DEGEN v1.1 (v2 API) lowcaps: ${lowCaps.length} paires.`);
@@ -185,17 +223,17 @@ function rsi(values, period = 14) {
   losses = (losses / period) || 1e-9;
 
   let rs = gains / losses;
-  let rsi = 100 - 100 / (1 + rs);
+  let rsiVal = 100 - 100 / (1 + rs);
 
   for (let i = period + 1; i < values.length; i++) {
     const diff = values[i] - values[i - 1];
     gains = (gains * (period - 1) + Math.max(diff, 0)) / period;
     losses = ((losses * (period - 1) + Math.max(-diff, 0)) / period) || 1e-9;
     rs = gains / losses;
-    rsi = 100 - 100 / (1 + rs);
+    rsiVal = 100 - 100 / (1 + rs);
   }
 
-  return rsi;
+  return rsiVal;
 }
 
 function vwap(candles) {
@@ -223,11 +261,12 @@ function calcWicks(candle) {
 // ========= PROCESS PAIRE =========
 
 async function processDegen(symbol){
-  const [tk,,depth] = await Promise.all([
+  const [tk, , depth] = await Promise.all([
     getTicker(symbol),
-    getFunding(symbol),
+    getFunding(symbol), // Gardé si besoin futur, mais non utilisé dans le calcul actuel
     getDepth(symbol)
   ]);
+  
   if (!tk) return null;
 
   const last = +tk.last;
@@ -237,11 +276,13 @@ async function processDegen(symbol){
   const volaPct = last ? ((high24-low24)/last)*100 : null;
   const change24 = tk.priceChangePercent != null ? (+tk.priceChangePercent)*100 : null;
 
+  // Récupération candles 5m (300s) et 15m (900s)
   const [c5m, c15m] = await Promise.all([
-    getCandles(symbol,300,100),
-    getCandles(symbol,900,100)
+    getCandles(symbol, 300, 100),
+    getCandles(symbol, 900, 100)
   ]);
-  if (!c5m.length || !c15m.length) return null;
+  
+  if (!c5m || c5m.length < 50 || !c15m || c15m.length < 50) return null;
 
   const closes5  = c5m.map(x=>x.c);
   const closes15 = c15m.map(x=>x.c);
@@ -256,11 +297,12 @@ async function processDegen(symbol){
   const wicks = calcWicks(currentCandle);
 
   const lastVol = currentCandle.v;
+  // Moyenne des 10 dernières bougies cloturées (exclure la courante pour la moyenne)
   const avgVol = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol > 0 ? lastVol / avgVol : 1;
 
   let obScore = 0, bidsVol=0, asksVol=0;
-  if (depth) {
+  if (depth && depth.bids && depth.asks) {
     bidsVol = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     asksVol = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     if (asksVol > 0) {
@@ -432,15 +474,17 @@ function checkAntiSpam(symbol, direction){
 
 async function scanDegen(){
   const now = Date.now();
-  const btcChange = await getBTCTrend();
-  if (btcChange == null || isNaN(btcChange)){
-    console.log("⚠️ BTC DATA ERROR.");
-    return;
-  }
-
+  
+  // Update de la liste si nécessaire
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS = await updateDegenList();
     lastSymbolUpdate = now;
+  }
+
+  const btcChange = await getBTCTrend();
+  if (btcChange == null || isNaN(btcChange)){
+    console.log("⚠️ BTC DATA ERROR (API Issue).");
+    return;
   }
 
   console.log(`🎯 DEGEN v1.1 (API v2) | BTC: ${btcChange.toFixed(2)}% | Symbols: ${DEGEN_SYMBOLS.length}`);
@@ -455,6 +499,7 @@ async function scanDegen(){
       const s = analyzeCandidate(r, btcChange);
       if (s) candidates.push(s);
     }
+    // Petit delai pour eviter le Rate Limit
     await sleep(300);
   }
 
@@ -463,13 +508,14 @@ async function scanDegen(){
     return;
   }
 
+  // Sélection du meilleur signal (Score puis Volume Ratio)
   const best = candidates.sort((a,b)=>{
     if (b.score !== a.score) return b.score - a.score;
     return (+b.volRatio) - (+a.volRatio);
   })[0];
 
   if ((now - lastGlobalTradeTime) < GLOBAL_COOLDOWN_MS){
-    console.log(`⏳ Cooldown : signal ${best.symbol} ignoré.`);
+    console.log(`⏳ Cooldown : signal ${best.symbol} ignoré (Score: ${best.score}).`);
     return;
   }
 
@@ -486,8 +532,8 @@ async function scanDegen(){
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 *Score:* ${best.score}/100
 
-📊 *Vol Spike:* x${best.volRatio}
-🌡️ *Vola24:* ${best.vola}%
+📊 *Vol Spike:* x${num(best.volRatio, 2)}
+🌡️ *Vola24:* ${num(best.vola, 2)}%
 📉 *ΔVWAP:* ${num(best.priceVsVwap,2)}%
 
 💰 *Prix:* ${best.last}
@@ -495,12 +541,12 @@ ${emoji} *${best.symbol}* — ${best.direction}
 _Wait for limit. No FOMO._`;
 
   await sendTelegram(msg);
-  console.log(`✅ SHOT : ${best.symbol}`);
+  console.log(`✅ SHOT : ${best.symbol} [${best.direction}] Score:${best.score}`);
   lastGlobalTradeTime = now;
 }
 
 async function main(){
-  console.log("🔫 DEGEN v1.1 (API v2) démarré.");
+  console.log("🔫 DEGEN v1.1 (API v2 FIXED) démarré.");
   await sendTelegram("🔫 *DEGEN v1.1 (API v2)* activé.");
   while(true){
     try { await scanDegen(); }
