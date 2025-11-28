@@ -1,83 +1,58 @@
-// index.js — CHEF D'ORCHESTRE ULTIME (MQI OFF)
-// Serveur Web + 4 Bots : Autoselect, Discovery, Degen, Swing
+import http from 'http';
+import process from 'process';
 
-import process from "process"; // 1. Import explicite système
-import http from "http";
-import { startAutoselect } from "./autoselect.js";
-import { startDiscovery } from "./discovery.js";
-import { startDegen } from "./degen.js";
-import { startSwing } from "./swing.js";
+// --- IMPORTS DES MODULES ---
+// Utilise try/catch pour ne pas tout planter si un fichier manque
+async function loadBot(name, path) {
+    try {
+        const module = await import(path);
+        if (module.default) module.default(); // Si export default
+        else if (module.startDegen) module.startDegen(); // Cas spécifique degen
+        else if (module.startAutoselect) module.startAutoselect(); // Cas spécifique autoselect
+        // Ajoute ici d'autres noms de fonctions si besoin (ex: startDiscovery)
+        else {
+            // Tente de lancer la première fonction exportée trouvée
+            const keys = Object.keys(module);
+            if (keys.length > 0 && typeof module[keys[0]] === 'function') {
+                module[keys[0]]();
+            }
+        }
+        console.log(`✅ ${name} lancé.`);
+    } catch (e) {
+        console.error(`⚠️ Impossible de lancer ${name} :`, e.message);
+    }
+}
 
-// 2. FIX GLOBAL : Rend 'process' disponible pour tous les modules enfants
-// Cela empêche définitivement les "ReferenceError: process is not defined" au démarrage
-global.process = process;
+// --- 1. SERVEUR HTTP (CRITIQUE POUR RAILWAY) ---
+const requestListener = function (req, res) {
+  res.writeHead(200);
+  res.end('JTF Bot is running!');
+};
 
-// ========= SÉCURITÉ GLOBALE (CRASH-PROOF) =========
+const port = process.env.PORT || 8080;
+const server = http.createServer(requestListener);
 
-// Empêche le container de s'arrêter sur une erreur non gérée
+server.listen(port, () => {
+    console.log(`🌍 Serveur HTTP écoutant sur le port ${port} (Requis pour Railway)`);
+    
+    // --- 2. LANCEMENT DES BOTS ---
+    console.log("🚀 Démarrage des modules JTF...");
+
+    // Lance les bots sans bloquer le thread principal
+    loadBot("DEGEN Sniper", "./degen.js");
+    loadBot("AUTOSELECT", "./autoselect.js");
+    
+    // Si tu as discovery.js ou swing.js, décommente :
+    // loadBot("DISCOVERY", "./discovery.js");
+    // loadBot("SWING", "./swing.js");
+});
+
+// --- GESTION DES ERREURS GLOBALES ---
 process.on('uncaughtException', (err) => {
-  console.error('🔥 CRITICAL: Uncaught Exception Global:', err);
-  // On ne quitte PAS le processus
+    console.error('🔥 CRASH NON GÉRÉ :', err);
+    // On ne quitte PAS le process pour garder le conteneur vivant
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('🔥 CRITICAL: Unhandled Rejection Global:', reason);
-  // On ne quitte PAS le processus
+    console.error('🔥 PROMESSE REJETÉE :', reason);
 });
-
-// ========= KEEPALIVE RAILWAY =========
-const PORT = process.env.PORT || 8080;
-
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("🤖 JTF QUAD-BOT IS RUNNING (Autoselect + Discovery + Degen + Swing)");
-}).listen(PORT, () => {
-  console.log(`🛡️ Serveur Global écoute sur le port ${PORT}`);
-});
-
-// ========= LANCEMENT ORCHESTRÉ =========
-
-console.log("🏁 Démarrage orchestré de la flotte JTF (Mode API v2 - Secure)...");
-
-// --- Autoselect ---
-(async () => {
-  try {
-    // Petit délai pour laisser le système s'initier
-    await new Promise(r => setTimeout(r, 1000));
-    await startAutoselect();
-  } catch (e) {
-    console.error("❌ CRASH INIT Autoselect:", e);
-  }
-})();
-
-// --- Discovery ---
-(async () => {
-  try {
-    await new Promise(r => setTimeout(r, 2000)); // Décalage pour éviter surcharge API
-    await startDiscovery();
-  } catch (e) {
-    console.error("❌ CRASH INIT Discovery:", e);
-  }
-})();
-
-// --- Degen ---
-(async () => {
-  try {
-    await new Promise(r => setTimeout(r, 3000));
-    await startDegen();
-  } catch (e) {
-    console.error("❌ CRASH INIT Degen:", e);
-  }
-})();
-
-// --- Swing ---
-(async () => {
-  try {
-    await new Promise(r => setTimeout(r, 4000));
-    await startSwing();
-  } catch (e) {
-    console.error("❌ CRASH INIT Swing:", e);
-  }
-})();
-
-console.log("🚀 Bots JTF lancés avec séquenceur.");
