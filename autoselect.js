@@ -314,75 +314,101 @@ async function sendTelegram(text){
 
 // ========= SCAN =========
 async function scanOnce(){
-  const t0=Date.now();
-  console.log(`🔍 AUTOSELECT scan…`);
+  const t0 = Date.now();
+  console.log("🔍 [AUTOSELECT] SCAN STARTED...");
 
-  const snapshots=[];
-  const BATCH=5;
+  const snapshots = [];
+  const BATCH     = 5;
 
-  for(let i=0;i<SYMBOLS.length;i+=BATCH){
-    const batch=SYMBOLS.slice(i,i+BATCH);
-    const res=await Promise.all(batch.map(s=>processSymbol(s).catch(()=>null)));
-    for(const r of res) if(r) snapshots.push(r);
+  for (let i = 0; i < SYMBOLS.length; i += BATCH){
+    const batch = SYMBOLS.slice(i, i + BATCH);
+    const res   = await Promise.all(
+      batch.map(s => processSymbol(s).catch(() => null))
+    );
+    for (const r of res) if (r) snapshots.push(r);
     await sleep(800);
   }
 
-  // FILTRAGE
-  const candidates=[];
-  for(const rec of snapshots){
-    const fusion=fuseJDS(rec);
-    const jds=fusion.jds;
-    const setupState=getSetupState(jds);
-    const oiImpulse=getOiImpulse(rec.deltaOIpct,rec.volaPct);
-    const rsiCoh=true;
-    const conf=computeConfidence(rec,fusion,setupState,oiImpulse);
-    const rr=estimateRR(rec.volaPct);
-    const plan=buildTradePlan(rec,fusion,jds,rr);
-    const reco=computeRecommendation(
-      jds,conf,rr,oiImpulse,rec.deltaVWAPpct,
-      setupState,fusion.direction,rsiCoh,rec
+  // Market noise check
+  const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
+  if (btcRec && isNoisyMarket(btcRec)){
+    const ms = Date.now() - t0;
+    console.log(`[AUTOSELECT] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | MARKET NOISE`);
+    return;
+  }
+
+  const candidates = [];
+  for (const rec of snapshots){
+    const fusion = fuseJDS(rec);
+    if (!fusion) continue;
+
+    const jds         = fusion.jds;
+    const setupState  = getSetupState(jds);
+    const oiImpulse   = getOiImpulse(rec.deltaOIpct, rec.volaPct);
+    const rsiCoherent = isRSICoherent(rec, fusion.direction);
+    const conf        = computeConfidence(rec, fusion, setupState, oiImpulse);
+    const rr          = estimateRR(rec.volaPct);
+    const plan        = buildTradePlan(rec, fusion, jds, rr);
+    const reco        = computeRecommendation(
+      jds, conf, rr, oiImpulse, rec.deltaVWAPpct,
+      setupState, fusion.direction, rsiCoherent, rec
     );
 
-    if(reco==="TAKE"){
+    if (reco.includes("SETUP")){
       candidates.push({
-        symbol:rec.symbol,
-        direction:fusion.direction,
-        jds,confiance:conf,
-        rec,rr,plan,reco
+        symbol:     rec.symbol,
+        direction:  fusion.direction,
+        jds,
+        setupState,
+        confiance:  conf,
+        oiImpulse,
+        rr,
+        plan,
+        rec,
+        reco,
+        rsiCoherent
       });
     }
   }
 
-  const ms = Date.now()-t0;
-  console.log(`[AUTOSELECT] ${snapshots.length} pairs | ${ms} ms | ${candidates.length} TAKE`);
+  const ms = Date.now() - t0;
+  console.log(`[AUTOSELECT] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | ${candidates.length} SETUP`);
 
-  if(!candidates.length) return;
-
-  const valid = candidates.filter(c => c.plan.entry && c.plan.sl && c.plan.tp1);
-  if(!valid.length) return;
-
-  const fresh = valid.filter(c => shouldSendFor(c.symbol,c.direction,c.reco));
-  if(!fresh.length) return;
-
-  // ========= TELEGRAM CLEAN OUTPUT =========
-  for(const c of fresh){
-
-    const emoji = c.direction==="LONG" ? "🚀" : "🪂";
-    const tpStr = c.plan.tp2 ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
-
-    const msg =
-`${emoji} ${c.direction} — ${c.symbol}
-Score: ${c.jds.toFixed(1)}
-
-Entry: ${c.plan.entry}
-TP: ${tpStr}
-SL: ${c.plan.sl}
-
-RR: ${c.plan.rr}
-Vola: ${c.rec.volaPct ?? "?"}%`;
-
-    await sendTelegram(msg);
+  if (!candidates.length){
+    return;
   }
+
+  const validCandidates = candidates.filter(c =>
+    c.plan.entry !== null &&
+    c.plan.sl    !== null &&
+    c.plan.tp1   !== null
+  );
+
+  if (!validCandidates.length){
+    return;
+  }
+
+  const fresh = validCandidates.filter(c =>
+    shouldSendFor(c.symbol, c.direction, c.reco)
+  );
+  if (!fresh.length) return;
+
+  const lines = ["📊 *JTF v0.8.5 AUTOSELECT — Signaux Confirmés*"];
+  fresh.forEach((c, idx) => {
+    const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
+    const tpStr    = c.plan.tp2 ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
+    lines.push("");
+    lines.push(`*${idx + 1}) ${c.symbol}*`);
+    lines.push(`${dirEmoji} *${c.direction}*`);
+    lines.push(`💠 Entry: ${c.plan.entry}`);
+    lines.push(`🛡️ SL: ${c.plan.sl}`);
+    lines.push(`🎯 TP: ${tpStr}`);
+    lines.push(`🔥 JDS: ${c.jds.toFixed(1)}`);
+    lines.push(`🔍 Confiance: ${c.confiance}%`);
+  });
+
+  await sendTelegram(lines.join("\n"));
+}
 }
 
 // ========= MAIN =========
