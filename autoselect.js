@@ -387,7 +387,7 @@ Vola: ${c.rec.volaPct ?? "?"}%`;
 
 // ========= MAIN =========
 export async function startAutoselect(){
-  console.log("🚀 AUTOSELECT On");
+  console.log("🔥 AUTOSELECT On");
   await sendTelegram("🟢 AUTOSELECT On");
   while(true){
     try{ await scanOnce(); }
