@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v1.6 (API v2 FULL FIX + stable + UMCBL auto)
+// degen.js — JTF DEGEN v1.7 (API v2 FINAL FIX, sans _UMCBL sur l’API)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -41,7 +41,7 @@ async function safeGetJson(url){
 }
 
 // ========= API v2 =========
-// Tous les symboles doivent être au format XXXXXUSDT_UMCBL
+// IMPORTANT : symbol API v2 = BTCUSDT (sans _UMCBL), productType=usdt-futures
 
 async function getTicker(symbol){
   const j = await safeGetJson(
@@ -117,7 +117,10 @@ function wicks(c){
   };
 }
 
-// ========= DYNAMIC LIST (UMCBL FIX) =========
+// ========= DYNAMIC LIST =========
+// ICI : on garde symbol tel quel (BTCUSDT, PEPEUSDT, …)
+// Pas de _UMCBL ajouté pour l’API v2
+
 async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
@@ -129,8 +132,9 @@ async function updateDegenList(){
     )
     .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
     .slice(0,30)
-    .map(t => `${t.symbol}_UMCBL`);
+    .map(t => t.symbol);
 
+  // éviter doublons
   return [...new Set(lowcaps)];
 }
 
@@ -140,7 +144,7 @@ async function processDegen(symbol){
   const tk = await getTicker(symbol);
   if(!tk) return null;
 
-  // FIX PRINCIPAL API V2 (prix)
+  // Prix : compatibilité API v2
   const last =
     tk.lastPrice ? +tk.lastPrice :
     tk.markPrice ? +tk.markPrice :
@@ -301,7 +305,6 @@ async function scanDegen(){
 
   const now = start;
 
-  // update list
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS    = await updateDegenList();
     lastSymbolUpdate = now;
@@ -315,7 +318,12 @@ async function scanDegen(){
     const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
     const results = await Promise.all(batch.map(async (s) => {
       const rec = await processDegen(s);
-      console.log("[DEGEN REC]", s, rec || "NULL");
+      console.log("[DEGEN REC]", s, rec ? JSON.stringify({
+        last: rec.last,
+        volaPct: rec.volaPct,
+        priceVsVwap: rec.priceVsVwap,
+        volRatio: rec.volRatio
+      }) : "NULL");
       return rec;
     }));
 
@@ -351,7 +359,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
   const msg =
-`🎯 *DEGEN v1.6 (API v2 FIX)*
+`🎯 *DEGEN v1.7 (API v2)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
