@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v1.7 (API v2 FINAL FIX, sans _UMCBL sur l’API)
+// degen.js — JTF DEGEN v1.9 (API v2 FINAL — Futures Only, No NULL, Clean List)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -40,9 +40,7 @@ async function safeGetJson(url){
   }
 }
 
-// ========= API v2 =========
-// IMPORTANT : symbol API v2 = BTCUSDT (sans _UMCBL), productType=usdt-futures
-
+// ========= API v2 (FUTURES ONLY) =========
 async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
@@ -83,16 +81,17 @@ function rsi(values,p=14){
 
   for(let i=1;i<=p;i++){
     const d = values[i]-values[i-1];
-    d>=0?g+=d:l-=d;
+    d>=0 ? g+=d : l-=d;
   }
   g/=p; l=(l/p)||1e-9;
+
   let val = 100 - 100/(1+(g/l));
 
   for(let i=p+1;i<values.length;i++){
     const d = values[i]-values[i-1];
     g=(g*(p-1)+Math.max(d,0))/p;
     l=((l*(p-1)+Math.max(-d,0))/p)||1e-9;
-    val=100 - 100/(1+(g/l));
+    val = 100 - 100/(1+(g/l));
   }
   return val;
 }
@@ -117,14 +116,12 @@ function wicks(c){
   };
 }
 
-// ========= DYNAMIC LIST =========
-// ICI : on garde symbol tel quel (BTCUSDT, PEPEUSDT, …)
-// Pas de _UMCBL ajouté pour l’API v2
-
+// ========= DYNAMIC LIST (100% FUTURES) =========
 async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
 
+  // Futures = _UMCBL
   const lowcaps = all
     .filter(t => t.symbol.endsWith("_UMCBL"))
     .filter(t => +t.usdtVolume > 3_000_000)
@@ -135,9 +132,6 @@ async function updateDegenList(){
   console.log("[DEGEN] LIST:", lowcaps);
   return lowcaps;
 }
-  // éviter doublons
-  return [...new Set(lowcaps)];
-}
 
 // ========= PROCESS ONE SYMBOL =========
 async function processDegen(symbol){
@@ -145,7 +139,6 @@ async function processDegen(symbol){
   const tk = await getTicker(symbol);
   if(!tk) return null;
 
-  // Prix : compatibilité API v2
   const last =
     tk.lastPrice ? +tk.lastPrice :
     tk.markPrice ? +tk.markPrice :
@@ -194,8 +187,6 @@ async function processDegen(symbol){
       else if(r<0.75) obScore=-1;
     }
   }
-
-console.log("[LIST DEBUG]", lowcaps.slice(0, 30));
 
   return {
     symbol,
@@ -308,6 +299,7 @@ async function scanDegen(){
 
   const now = start;
 
+  // update list every hour
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS    = await updateDegenList();
     lastSymbolUpdate = now;
@@ -321,12 +313,14 @@ async function scanDegen(){
     const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
     const results = await Promise.all(batch.map(async (s) => {
       const rec = await processDegen(s);
+
       console.log("[DEGEN REC]", s, rec ? JSON.stringify({
         last: rec.last,
         volaPct: rec.volaPct,
         priceVsVwap: rec.priceVsVwap,
         volRatio: rec.volRatio
       }) : "NULL");
+
       return rec;
     }));
 
@@ -362,7 +356,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
   const msg =
-`🎯 *DEGEN v1.7 (API v2)*
+`🎯 *DEGEN v1.9 (API v2)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
