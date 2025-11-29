@@ -269,6 +269,25 @@ async function processSymbol(symbol){
 // computeRecommendation, isNoisyMarket, shouldSendFor
 // — ALL IDENTICAL (no logic change)
 
+// ========= TELEGRAM =========
+async function sendTelegram(text){
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  try{
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "Markdown"
+      })
+    });
+  }catch(e){
+    logDebug("sendTelegram ERROR", e);
+  }
+}
+
 // ========= SCAN =========
 async function scanOnce(){
   const t0 = Date.now();
