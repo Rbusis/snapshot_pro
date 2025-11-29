@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v3.0 (API v2 FIX + Logique DEGEN + Data Check)
+// degen.js — JTF DEGEN v3.1 (API v2 FIX + Logique DEGEN + DROP/DATA Logs)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -147,7 +147,7 @@ async function processDegen(symbol){
 
   const tk = await getTicker(symbol);
   if(!tk){
-    logDebug("NO TICKER", symbol);
+    console.log(`[DEGEN DROP] ${symbol} — no ticker data`);
     return null;
   }
 
@@ -162,7 +162,7 @@ async function processDegen(symbol){
     : null;
 
   if(!last || last <= 0){
-    logDebug("INVALID PRICE", symbol, last);
+    console.log(`[DEGEN DROP] ${symbol} — invalid price: ${last}`);
     return null;
   }
 
@@ -179,12 +179,12 @@ async function processDegen(symbol){
   ]);
 
   if(!c3m?.length || c3m.length < 20){
-    logDebug("INSUFFICIENT 3m CANDLES", symbol);
+    console.log(`[DEGEN DROP] ${symbol} — insufficient 3m candles (${c3m?.length || 0})`);
     return null;
   }
 
   const rsi3  = rsi(c3m.map(x=>x.c));
-  const rsi15 = rsi(c15m.map(x=>x.c)); // utile si on veut le réutiliser
+  const rsi15 = rsi(c15m.map(x=>x.c));
 
   const vwp = vwap(c3m.slice(-24));
   const priceVsVwap = vwp ? ((last-vwp)/vwp)*100 : 0;
@@ -376,7 +376,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v3.0 (API v2)*
+`🎯 *JTF DEGEN v3.1 (API v2)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
@@ -400,8 +400,8 @@ _Wait for limit — sniper mode._`;
 
 // ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN v3.0 On");
-  await sendTelegram("🟢 DEGEN v3.0 On");
+  console.log("🔥 DEGEN v3.1 On");
+  await sendTelegram("🟢 DEGEN v3.1 On");
   while(true){
     try{ await scanDegen(); }
     catch(e){ console.log("[DEGEN ERROR]", e); }
