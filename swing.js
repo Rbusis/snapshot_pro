@@ -1,4 +1,4 @@
-// swing.js — SWING v1.5 (Clean Output + Debug Control + API v2 FIX)
+// swing.js — SWING v1.6 (API v2 FIX + Clean Output + Data Logs)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -26,7 +26,7 @@ function logDebug(...args){
 }
 
 // ========= CONFIG =========
-const SCAN_INTERVAL_MS = 30 * 60_000;
+const SCAN_INTERVAL_MS = 30 * 60_000; // 30 min
 
 const JDS_READY = 75;
 const JDS_PRIME = 85;
@@ -44,18 +44,23 @@ const SYMBOLS = [
 ];
 
 // ========= STATE =========
-const prevOI = new Map();
+const prevOI    = new Map();
 const lastAlerts = new Map();
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const sleep      = ms => new Promise(r => setTimeout(r, ms));
 
-const num = (v,d=4)=>v==null?null:+(+v).toFixed(d);
+const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 
 // ========= SAFE FETCH =========
 async function safeGetJson(url){
   try{
+    logDebug("safeGetJson", url);
     const r = await fetch(url,{headers:{Accept:"application/json"}});
-    return r.ok ? await r.json() : null;
+    if(!r.ok){
+      logDebug("HTTP ERROR", r.status, url);
+      return null;
+    }
+    return await r.json();
   }catch(e){
     logDebug("safeGetJson ERROR",url,e);
     return null;
@@ -161,17 +166,20 @@ async function processSymbol(symbol){
   ]);
 
   if(!tk){
-    logDebug("NO TICKER",symbol);
+    console.log(`[SWING DROP] ${symbol} — no ticker data`);
     return null;
   }
 
   const last = +(
     tk.lastPr ?? tk.markPrice ?? tk.last ?? tk.close ?? null
   );
-  if(!last) return null;
+  if(!last){
+    console.log(`[SWING DROP] ${symbol} — invalid price`);
+    return null;
+  }
 
-  const high24 = tk.high24h?+tk.high24h:null;
-  const low24  = tk.low24h?+tk.low24h:null;
+  const high24 = tk.high24h!=null?+tk.high24h:null;
+  const low24  = tk.low24h!=null?+tk.low24h:null;
 
   const openI = oi?.amount!=null?+oi.amount:null;
   const prev  = prevOI.get(symbol) ?? null;
@@ -187,11 +195,15 @@ async function processSymbol(symbol){
   ]);
 
   if(!c15.length || !c1h.length || !c4h.length){
-    logDebug("missing candles",symbol);
+    console.log(
+      `[SWING DROP] ${symbol} — missing candles ` +
+      `(15m=${c15.length},1h=${c1h.length},4h=${c4h.length})`
+    );
     return null;
   }
 
-  const depth = await getDepth(symbol);
+  await getDepth(symbol); // appelé pour charge orderbook si besoin (pas utilisé pour le score ici)
+
   const volaPct = (high24!=null && low24!=null)
     ? ((high24-low24)/last)*100
     : null;
@@ -213,77 +225,115 @@ async function processSymbol(symbol){
   const rsi1h = rsi(c1h.map(x=>x.c));
   const rsi4h = rsi(c4h.map(x=>x.c));
 
+  const atr1hPct = atr1? (atr1/last)*100 : null;
+  const atr4hPct = atr4? (atr4/last)*100 : null;
+
+  const deltaOIpct = deltaOI!=null ? +num(deltaOI,3) : null;
+  const deltaVWAP1h = dVWAP1h!=null ? +num(dVWAP1h,4) : null;
+  const deltaVWAP4h = dVWAP4h!=null ? +num(dVWAP4h,4) : null;
+
+  // Log DATA pour Swing
+  console.log(
+    `[SWING DATA] ${symbol} | P=${last} | Vola24=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
+    `ATR1h=${atr1hPct!=null?atr1hPct.toFixed(2):"n/a"}% | ΔVWAP1h=${deltaVWAP1h!=null?deltaVWAP1h.toFixed(3):"n/a"} | ` +
+    `ΔVWAP4h=${deltaVWAP4h!=null?deltaVWAP4h.toFixed(3):"n/a"} | ΔOI=${deltaOIpct!=null?deltaOIpct.toFixed(3):"n/a"} | ` +
+    `RSI(15m/1h/4h)=${num(rsi15,1)}/${num(rsi1h,1)}/${num(rsi4h,1)}`
+  );
+
   return {
-    symbol,last,high24,low24,volaPct,tend24,posDay,
-    dVWAP1h:num(dVWAP1h,4),
-    dVWAP4h:num(dVWAP4h,4),
-    deltaOIpct:num(deltaOI,3),
-    atr1hPct: atr1?num((atr1/last)*100,4):null,
-    atr4hPct: atr4?num((atr4/last)*100,4):null,
-    rsi:{ "15m":num(rsi15,2),"1h":num(rsi1h,2),"4h":num(rsi4h,2) },
-    c15,c1h,c4h
+    symbol,
+    last,
+    high24,
+    low24,
+    volaPct,
+    tend24,
+    posDay,
+    deltaVWAP1h,
+    deltaVWAP4h,
+    deltaOIpct,
+    atr1hPct: atr1hPct!=null?+num(atr1hPct,4):null,
+    atr4hPct: atr4hPct!=null?+num(atr4hPct,4):null,
+    rsi: {
+      "15m": rsi15!=null?+num(rsi15,2):null,
+      "1h":  rsi1h!=null?+num(rsi1h,2):null,
+      "4h":  rsi4h!=null?+num(rsi4h,2):null
+    }
   };
 }
 
 // ========= SWING ENGINE =========
-// (JDS, detectDirection, timing, filters, etc. inchangés)
-
 function calculateJDSSwing(rec){
   let score=0;
 
-  if(rec.rsi["15m"] > 60) score+=12;
-  if(rec.rsi["15m"] < 40) score+=12;
+  // RSI 15m extrêmes
+  if(rec.rsi["15m"] != null){
+    if(rec.rsi["15m"] > 60) score+=12;
+    if(rec.rsi["15m"] < 40) score+=12;
+  }
 
-  if(Math.abs(rec.dVWAP1h) < 1.2) score+=10;
+  // Prix pas trop éloigné du VWAP 1h
+  if(rec.deltaVWAP1h != null && Math.abs(rec.deltaVWAP1h) < 1.2) score+=10;
 
-  if(rec.deltaOIpct>1) score+=8;
-  if(rec.deltaOIpct<-1) score+=8;
+  // Construction/purge OI
+  if(rec.deltaOIpct!=null){
+    if(rec.deltaOIpct>1)  score+=8;
+    if(rec.deltaOIpct<-1) score+=8;
+  }
 
-  if(rec.atr1hPct<MAX_ATR_1H) score+=12;
-  if(rec.volaPct<MAX_VOLA_24) score+=12;
+  // ATR / Vola raisonnables
+  if(rec.atr1hPct!=null && rec.atr1hPct<MAX_ATR_1H)    score+=12;
+  if(rec.volaPct!=null && rec.volaPct<MAX_VOLA_24)     score+=12;
 
-  if(Math.abs(rec.dVWAP4h) < MAX_VWAP_4H) score+=10;
+  // Prix pas trop loin du VWAP 4h
+  if(rec.deltaVWAP4h!=null && Math.abs(rec.deltaVWAP4h) < MAX_VWAP_4H) score+=10;
 
   return score;
 }
 
 function detectDirection(rec,jds){
-  if(rec.rsi["15m"]>55 && rec.dVWAP1h>0) return "LONG";
-  if(rec.rsi["15m"]<45 && rec.dVWAP1h<0) return "SHORT";
+  if(rec.rsi["15m"]!=null && rec.deltaVWAP1h!=null){
+    if(rec.rsi["15m"]>55 && rec.deltaVWAP1h>0) return "LONG";
+    if(rec.rsi["15m"]<45 && rec.deltaVWAP1h<0) return "SHORT";
+  }
   return "NEUTRAL";
 }
 
 function isTimingGood(rec,dir){
+  if(rec.rsi["15m"]==null) return false;
   if(dir==="LONG")  return rec.rsi["15m"]>55;
   if(dir==="SHORT") return rec.rsi["15m"]<45;
   return false;
 }
 
 function shouldAvoid(rec){
-  if(rec.atr1hPct>MAX_ATR_1H) return true;
-  if(rec.volaPct>MAX_VOLA_24) return true;
+  if(rec.atr1hPct!=null && rec.atr1hPct>MAX_ATR_1H) return true;
+  if(rec.volaPct!=null && rec.volaPct>MAX_VOLA_24)  return true;
   return false;
 }
 
+// Plan simple basé sur ATR 1h
 function buildPlan(rec,dir){
   const entry = rec.last;
-  const atr = rec.atr1hPct?rec.atr1hPct/100*rec.last:rec.last*0.004;
-  const sl = dir==="LONG" ? entry - atr : entry + atr;
-  const tp = dir==="LONG" ? entry + atr*2 : entry - atr*2;
+  const atrPerc = rec.atr1hPct!=null ? rec.atr1hPct : 0.4; // fallback 0.4%
+  const atrAbs  = entry * (atrPerc/100);
+
+  const sl = dir==="LONG" ? entry - atrAbs : entry + atrAbs;
+  const tp = dir==="LONG" ? entry + atrAbs*2 : entry - atrAbs*2;
+
   return {
-    entry:num(entry,4),
-    sl:num(sl,4),
-    tp:num(tp,4),
-    rr: (2).toFixed(1)
+    entry: num(entry,4),
+    sl:    num(sl,4),
+    tp:    num(tp,4),
+    rr:    2.0
   };
 }
 
-// ========= ANTI-SPAM =========
-function shouldSend(symbol,dir){
-  const key = `${symbol}-${dir}`;
+// Anti-spam Swing
+function shouldSend(symbol,dir,state){
+  const key = `${symbol}-${dir}-${state}`;
   const now = Date.now();
   const last = lastAlerts.get(key);
-  if(last && now-last < 30*60_000) return false;
+  if(last && now-last < 30*60_000) return false; // 30min
   lastAlerts.set(key,now);
   return true;
 }
@@ -301,85 +351,67 @@ async function scanOnce(){
     if(i+5<SYMBOLS.length)await sleep(800);
   }
 
-  const ready=[],prime=[];
+  const setups=[];
   for(const rec of snaps){
-    const j=calculateJDSSwing(rec);
-    if(j<60)continue;
+    const j = calculateJDSSwing(rec);
+    if(j < JDS_READY) continue;
+    if(shouldAvoid(rec)) continue;
 
-    const avoid=shouldAvoidMarket(rec);
-    if(avoid)continue;
+    const dir = detectDirection(rec,j);
+    if(dir === "NEUTRAL") continue;
+    if(!isTimingGood(rec,dir)) continue;
 
-    if(j<82 && rec.volaPct<6)continue;
+    const plan = buildPlan(rec,dir);
 
-    const dir=detectDirection(rec,j);
+    const state = j>=JDS_PRIME ? "PRIME" : "READY";
 
-    if(dir==="LONG"&&rec.deltaOIpct<-2)continue;
-    if(dir==="SHORT"&&rec.deltaOIpct>2)continue;
-
-    if(!isTimingGood(rec,dir))continue;
-
-    const plan=calculateTradePlan(rec,dir,j);
-    const lev = getRecommendedLeverage(rec.volaPct);
-    const dur = estimateDuration(j,rec);
-
-    const setup={
-      symbol:rec.symbol,
-      direction:dir,
-      jds:num(j,1),
-      entry:plan.entry,
-      sl:plan.sl,
-      tp1:plan.tp1,
-      tp2:plan.tp2,
-      rr:plan.rr,
-      leverage:lev,
-      duration:dur,
-      moveToBe:getMoveToBeCondition(),
-      momentum:`RSI 15m:${rec.rsi["15m"]} | 1h:${rec.rsi["1h"]} | 4h:${rec.rsi["4h"]}`,
-      vwapContext:`VWAP 1h:${rec.deltaVWAP1h}% | 4h:${rec.deltaVWAP4h}%`
-    };
-
-    if(j>=JDS_THRESHOLD_PRIME)prime.push(setup);
-    else if(j>=JDS_THRESHOLD_READY)ready.push(setup);
+    setups.push({
+      symbol: rec.symbol,
+      dir,
+      jds: num(j,1),
+      state,
+      entry: plan.entry,
+      sl: plan.sl,
+      tp: plan.tp,
+      rr: plan.rr,
+      rec
+    });
   }
 
-  const totalSetup = prime.length + ready.length;
-  const duration   = Date.now() - start;
-  console.log(`[SWING] SCAN — ${SYMBOLS.length} PAIRS | ${duration} MS | ${totalSetup} SETUP`);
+  const duration = Date.now() - start;
+  console.log(`[SWING] SCAN — ${SYMBOLS.length} PAIRS | ${duration} MS | ${setups.length} SETUP`);
 
-  if(!prime.length && !ready.length){
-    // aucun envoi Telegram (on garde le log uniquement)
-    return;
-  }
+  if(!setups.length) return;
 
-  const sends = prime.length?prime:ready.slice(0,3);
-  const state = prime.length?"PRIME":"READY";
+  // On privilégie PRIME, sinon READY
+  const prime = setups.filter(s=>s.state==="PRIME");
+  const chosen = (prime.length?prime:setups).sort((a,b)=>b.jds-a.jds).slice(0,3);
+  const labelState = prime.length?"PRIME":"READY";
 
-  let msg=`🎯 *JTF SWING — ${state}*\n\n`;
-  for(let i=0;i<sends.length;i++){
-    const s=sends[i];
-    if(!shouldSendAlert(s.symbol,s.direction,state))continue;
-    const emoji=s.direction==="LONG"?"📈":"📉";
+  let msg = `🎯 *JTF SWING v1.6 — ${labelState}*\n\n`;
 
-    msg+=`*${i+1}) ${s.symbol}*\n`;
-    msg+=`${emoji} *${s.direction}*\n`;
-    msg+=`💠 Entry: ${s.entry}\n`;
-    msg+=`🛡️ SL: ${s.sl}\n`;
-    msg+=`🎯 TP1:${s.tp1} | TP2:${s.tp2}\n`;
-    msg+=`📏 Levier: ${s.leverage} — R:R=${s.rr}\n`;
-    msg+=`⏱️ Durée: ${s.duration}\n`;
-    msg+=`🔄 Move to BE: ${s.moveToBe}\n`;
-    msg+=`🔥 JDS-SWING: ${s.jds}\n`;
-    msg+=`📊 Momentum: ${s.momentum}\n`;
-    msg+=`📍 VWAP: ${s.vwapContext}\n\n`;
-  }
+  chosen.forEach((s,idx)=>{
+    if(!shouldSend(s.symbol,s.dir,labelState)) return;
+    const emoji = s.dir==="LONG"?"📈":"📉";
+    msg += `*${idx+1}) ${s.symbol}*\n`;
+    msg += `${emoji} *${s.dir}*\n`;
+    msg += `💠 Entry: ${s.entry}\n`;
+    msg += `🛡️ SL: ${s.sl}\n`;
+    msg += `🎯 TP: ${s.tp}\n`;
+    msg += `📏 R:R ≈ ${s.rr.toFixed(1)}\n`;
+    msg += `🔥 JDS-SWING: ${s.jds}\n`;
+    msg += `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}\n`;
+    msg += `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%\n`;
+    msg += `📉 ΔOI: ${s.rec.deltaOIpct}% | ATR1h: ${s.rec.atr1hPct}%\n\n`;
+  });
 
   await sendTelegram(msg);
 }
 
 // ========= MAIN LOOP =========
 export async function startSwing(){
-  console.log("🔥 SWING On");
-  await sendTelegram("🟢 SWING On");
+  console.log("🔥 SWING v1.6 On");
+  await sendTelegram("🟢 SWING SWING v1.6 On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.error("[SWING ERROR]",e); }
