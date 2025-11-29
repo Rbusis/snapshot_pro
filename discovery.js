@@ -1,4 +1,4 @@
-// discovery.js — JTF DISCOVERY v1.6 (FULL API v2 FIX)
+// discovery.js — JTF DISCOVERY v1.6.1 (FULL API v2 FIX)
 // Stable — Debug complet — Compatible Railway
 
 import fetch from "node-fetch";
@@ -29,7 +29,7 @@ const FALLBACK_MIDCAPS = [
   "ARBUSDT_UMCBL", "AGIXUSDT_UMCBL"
 ];
 
-// Ignorés (majeurs + déjà scannés ailleurs)
+// Ignorés
 const IGNORE_LIST = [
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
@@ -54,7 +54,7 @@ async function safeGetJson(url){
   }
 }
 
-// ========= API v2 (symbol EXACT : XXXUSDT_UMCBL) =========
+// ========= API v2 =========
 
 // Candles
 async function getCandles(symbol, seconds, limit=200){
@@ -67,7 +67,7 @@ async function getCandles(symbol, seconds, limit=200){
   })).sort((a,b)=>a.t-b.t);
 }
 
-// 🔥 FIX COMPLET : getTicker valide
+// ----------- FIX : Ticker 100% correct -----------
 async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
@@ -75,16 +75,13 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-// Funding
 async function getFunding(symbol){
-  return (
-    await safeGetJson(
-      `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${symbol}&productType=usdt-futures`
-    )
-  )?.data ?? null;
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${symbol}&productType=usdt-futures`
+  );
+  return j?.data ?? null;
 }
 
-// Depth
 async function getDepth(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/depth?symbol=${symbol}&limit=20&productType=usdt-futures`
@@ -92,7 +89,7 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// Full tickers
+// All futures list
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -100,7 +97,7 @@ async function getAllTickers(){
   return j?.data ?? [];
 }
 
-// ========= BTC Trend =========
+// ========= BTC TREND =========
 async function getBTCTrend(){
   const c = await getCandles("BTCUSDT_UMCBL", 3600, 5);
   if(!c?.length) return null;
@@ -108,11 +105,11 @@ async function getBTCTrend(){
   return ((last.c - last.o)/last.o)*100;
 }
 
-// ========= Update Discovery List =========
+// ========= UPDATE DISCOVERY LIST =========
 async function updateDiscoveryList(){
   const all = await getAllTickers();
   if(!all.length){
-    console.log("⚠ DiscoveryList : fallback (no market data)");
+    console.log("⚠ DiscoveryList fallback (no market data)");
     return FALLBACK_MIDCAPS;
   }
 
@@ -123,16 +120,17 @@ async function updateDiscoveryList(){
   );
 
   list.sort((a,b)=>(+b.usdtVolume) - (+a.usdtVolume));
-  const midcaps = list.slice(0,50).map(t=>t.symbol);
+
+  const finalList = list.slice(0,50).map(t=>t.symbol);
 
   try{
-    fs.writeFileSync("./config/discovery_list.json", JSON.stringify(midcaps,null,2));
+    fs.writeFileSync("./config/discovery_list.json", JSON.stringify(finalList,null,2));
   }catch{}
 
-  return midcaps.length ? midcaps : FALLBACK_MIDCAPS;
+  return finalList.length ? finalList : FALLBACK_MIDCAPS;
 }
 
-// ========= INDICS =========
+// ========= INDICATORS =========
 function rsi(values,p=14){
   if(!values || values.length < p+1) return null;
   let g=0,l=0;
@@ -183,46 +181,42 @@ async function processDiscovery(symbol){
 
   const last = +tk.lastPr || +tk.markPrice || +tk.last || null;
   if(!last){
-    console.log(`[DISCOVERY DEBUG] ${symbol}: ❌ last=NULL (ticker incomplete)`);
+    console.log(`[DISCOVERY DEBUG] ${symbol}: ❌ last=NULL`);
     return null;
   }
 
-  // 24h vola
   const high24 = +tk.high24h;
   const low24  = +tk.low24h;
   const volaPct = last ? ((high24-low24)/last)*100 : null;
 
-  // candles 5m / 15m
   const [c5m,c15m] = await Promise.all([
     getCandles(symbol,300,100),
     getCandles(symbol,900,100)
   ]);
+
   if(!c5m?.length){
-    console.log(`[DISCOVERY DEBUG] ${symbol}: ❌ Candles MISSING`);
+    console.log(`[DISCOVERY DEBUG] ${symbol}: ❌ Missing candles`);
     return null;
   }
 
   const rsi5  = rsi(c5m.map(x=>x.c));
   const rsi15 = rsi(c15m.map(x=>x.c));
-
   const vwap5 = vwap(c5m.slice(-24));
   const priceVsVwap = vwap5 ? ((last-vwap5)/vwap5)*100 : 0;
 
   const wick = wicks(c5m[c5m.length-1]);
-
   const lastVol = c5m[c5m.length-1].v;
   const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol>0 ? lastVol/avgVol : 1;
-
   const change24 = tk.priceChangePercent ? (+tk.priceChangePercent)*100 : 0;
 
-  // depth
   const depth = await getDepth(symbol);
   let obScore=0, bids=0, asks=0;
 
   if(depth){
     bids = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     asks = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
+
     if(asks>0){
       const r=bids/asks;
       if(r>1.25) obScore=1;
@@ -231,7 +225,7 @@ async function processDiscovery(symbol){
   }
 
   console.log(
-    `[DISCOVERY DEBUG] ${symbol}: last=${last} | vola=${num(volaPct)} | rsi5=${num(rsi5)} | VWAPgap=${num(priceVsVwap)} | volRatio=${num(volRatio)}`
+    `[DISCOVERY DEBUG] ${symbol}: last=${last} | vola=${num(volaPct)} | rsi5=${num(rsi5)} | vwapGap=${num(priceVsVwap)} | volRatio=${num(volRatio)}`
   );
 
   return {
@@ -241,7 +235,7 @@ async function processDiscovery(symbol){
   };
 }
 
-// ========= LOGIC =========
+// ========= ANALYZE =========
 function analyze(rec, btc){
   if(!rec||btc==null) return null;
 
@@ -349,7 +343,7 @@ async function scanDiscovery(){
     return;
   }
 
-  console.log(`🔥 Discovery v1.6 — BTC Trend=${btc.toFixed(2)}%`);
+  console.log(`🔥 Discovery v1.6.1 — BTC Trend=${btc.toFixed(2)}%`);
 
   if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
     DISCOVERY_SYMBOLS = await updateDiscoveryList();
@@ -390,7 +384,7 @@ async function scanDiscovery(){
   const emoji=best.direction==="LONG"?"🚀":"🪂";
 
   const msg=
-`⚡ *JTF DISCOVERY v1.6* ⚡
+`⚡ *JTF DISCOVERY v1.6.1* ⚡
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}
@@ -414,8 +408,8 @@ _Momentum Midcaps — API v2 FIXED_`;
 
 // ========= START =========
 async function main(){
-  console.log("🔥 Discovery v1.6 — démarré.");
-  await sendTelegram("🟢 Discovery v1.6 lancé (API v2 FIX).");
+  console.log("🔥 Discovery v1.6.1 — démarré.");
+  await sendTelegram("🟢 Discovery v1.6.1 lancé (API v2 FIX).");
   while(true){
     try{ await scanDiscovery(); }
     catch(e){ console.error("DISCOVERY CRASH:",e); }
