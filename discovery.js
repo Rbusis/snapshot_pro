@@ -1,4 +1,4 @@
-i// discovery.js — JTF DISCOVERY v1.8 (Clean Output + API v2 + Debug Control)
+// discovery.js — JTF DISCOVERY v1.8 (Clean Output + API v2 + Debug Control)
 
 import fetch from "node-fetch";
 import fs from "fs";
