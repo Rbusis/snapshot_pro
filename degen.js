@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v1.5 (API v2 FULL FIX + _UMCBL Auto + Stable)
+// degen.js — JTF DEGEN v1.6 (API v2 FULL FIX + stable + UMCBL auto)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -20,10 +20,10 @@ const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
 // ========= STATE =========
-let DEGEN_SYMBOLS      = [];
-let lastSymbolUpdate   = 0;
+let DEGEN_SYMBOLS       = [];
+let lastSymbolUpdate    = 0;
 let lastGlobalTradeTime = 0;
-const lastAlerts       = new Map();
+const lastAlerts        = new Map();
 
 // ========= UTILS =========
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -35,16 +35,15 @@ async function safeGetJson(url){
     const r = await fetch(url, { headers:{Accept:"application/json"} });
     return r.ok ? await r.json() : null;
   } catch(e){
-    logDebug("safeGetJson ERROR", url, e);
+    console.log("[DEGEN ERROR safeGetJson]", url, e);
     return null;
   }
 }
 
 // ========= API v2 =========
-// IMPORTANT : Tous les symboles doivent être au format : XXXXXUSDT_UMCBL
+// Tous les symboles doivent être au format XXXXXUSDT_UMCBL
 
 async function getTicker(symbol){
-  logDebug("getTicker", symbol);
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
   );
@@ -52,30 +51,25 @@ async function getTicker(symbol){
 }
 
 async function getCandles(symbol, seconds, limit=80){
-  logDebug("getCandles", symbol, seconds);
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
   );
   if (!j?.data?.length) return [];
-  return j.data
-    .map(c => ({
-      t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
-    }))
-    .sort((a,b)=>a.t-b.t);
+  return j.data.map(c => ({
+    t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
+  })).sort((a,b)=>a.t-b.t);
 }
 
 async function getDepth(symbol){
-  logDebug("getDepth", symbol);
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`
   );
   if(!j?.data) return null;
   const d = Array.isArray(j.data) ? j.data[0] : j.data;
-  return (d?.bids && d?.asks) ? d : null;
+  return d?.bids && d?.asks ? d : null;
 }
 
 async function getAllTickers(){
-  logDebug("getAllTickers");
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
   );
@@ -95,7 +89,7 @@ function rsi(values,p=14){
   let val = 100 - 100/(1+(g/l));
 
   for(let i=p+1;i<values.length;i++){
-    const d=values[i]-values[i-1];
+    const d = values[i]-values[i-1];
     g=(g*(p-1)+Math.max(d,0))/p;
     l=((l*(p-1)+Math.max(-d,0))/p)||1e-9;
     val=100 - 100/(1+(g/l));
@@ -123,7 +117,7 @@ function wicks(c){
   };
 }
 
-// ========= DYNAMIC LIST (FULL FIX _UMCBL) =========
+// ========= DYNAMIC LIST (UMCBL FIX) =========
 async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
@@ -135,22 +129,26 @@ async function updateDegenList(){
     )
     .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
     .slice(0,30)
-    .map(t => `${t.symbol}_UMCBL`);    // FIX ICI
+    .map(t => `${t.symbol}_UMCBL`);
 
-  // éviter doublons
   return [...new Set(lowcaps)];
 }
 
 // ========= PROCESS ONE SYMBOL =========
 async function processDegen(symbol){
-  logDebug("processDegen",symbol);
 
   const tk = await getTicker(symbol);
   if(!tk) return null;
 
+  // FIX PRINCIPAL API V2 (prix)
   const last =
-    tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN;
-  if(!last || Number.isNaN(last)) return null;
+    tk.lastPrice ? +tk.lastPrice :
+    tk.markPrice ? +tk.markPrice :
+    tk.close ? +tk.close :
+    tk.lastPr ? +tk.lastPr :
+    NaN;
+
+  if (!last || Number.isNaN(last)) return null;
 
   const high24 = tk.high24h!=null ? +tk.high24h : null;
   const low24  = tk.low24h!=null ? +tk.low24h  : null;
@@ -303,7 +301,7 @@ async function scanDegen(){
 
   const now = start;
 
-  // Mise à jour liste
+  // update list
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS    = await updateDegenList();
     lastSymbolUpdate = now;
@@ -317,7 +315,7 @@ async function scanDegen(){
     const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
     const results = await Promise.all(batch.map(async (s) => {
       const rec = await processDegen(s);
-      console.log("[DEGEN REC]", s, rec); // debug utile
+      console.log("[DEGEN REC]", s, rec || "NULL");
       return rec;
     }));
 
@@ -353,7 +351,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
   const msg =
-`🎯 *DEGEN v1.5 (API v2 FIX)*
+`🎯 *DEGEN v1.6 (API v2 FIX)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
