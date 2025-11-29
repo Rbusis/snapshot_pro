@@ -1,5 +1,5 @@
 // ===== DEBUG CONTROL (GLOBAL + PER BOT) =====
-export const DEBUG = {
+import { DEBUG } from "./debug.js";
   global: false,      // Active le debug pour tous les bots
   autoselect: false,  // Debug du bot AUTOSELECT
   discovery: false,   // Debug du bot DISCOVERY
