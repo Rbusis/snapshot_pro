@@ -1,6 +1,7 @@
-// degen.js — JTF DEGEN v3.1 (Stable + API v2 + Check Logs)
+// degen.js — JTF DEGEN v3.0 (Stable, API v2, Identique Discovery)
 
 import fetch from "node-fetch";
+import { DEBUG } from "./debug.js";
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -12,63 +13,50 @@ const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
 // ========= STATE =========
-let DEGEN_SYMBOLS       = [];
-let lastSymbolUpdate    = 0;
+let DEGEN_SYMBOLS      = [];
+let lastSymbolUpdate   = 0;
 let lastGlobalTradeTime = 0;
-const lastAlerts        = new Map();
+const lastAlerts       = new Map();
 
 // ========= UTILS =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 
-// Forcer symbole API v2
-function toApiSymbol(symbol){
-  return symbol.replace(/USDT$/, "");
-}
-
 async function safeGetJson(url){
   try{
-    console.log(`[DEGEN FETCH] ${url}`);
     const r = await fetch(url,{headers:{Accept:"application/json"}});
     if(!r.ok) return null;
     return await r.json();
-  } catch(e){
-    console.log("[DEGEN FETCH ERROR]", e.message);
+  }catch(e){
+    console.log("[DEGEN safeGetJson ERROR]", e.message);
     return null;
   }
 }
 
-// ========= API v2 =========
+// ========= API v2 IDENTIQUE DISCOVERY =========
 async function getTicker(symbol){
-  const apiSymbol = toApiSymbol(symbol);
-  const url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${apiSymbol}&productType=usdt-futures`;
-
-  const j = await safeGetJson(url);
-  if(!j?.data) return null;
-
-  return Array.isArray(j.data) ? j.data[0] : j.data;
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
+  );
+  return j?.data ? (Array.isArray(j.data) ? j.data[0] : j.data) : null;
 }
 
 async function getCandles(symbol, seconds, limit=120){
-  const apiSymbol = toApiSymbol(symbol);
-  const url = `https://api.bitget.com/api/v2/mix/market/candles?symbol=${apiSymbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`;
-
-  const j = await safeGetJson(url);
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
+  );
   if(!j?.data?.length) return [];
-
   return j.data.map(c=>({
     t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
   })).sort((a,b)=>a.t-b.t);
 }
 
 async function getDepth(symbol){
-  const apiSymbol = toApiSymbol(symbol);
-  const url = `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${apiSymbol}&productType=usdt-futures&limit=20`;
-
-  const j = await safeGetJson(url);
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`
+  );
   if(!j?.data) return null;
-
   const d = Array.isArray(j.data)?j.data[0]:j.data;
   return d?.bids && d?.asks ? d : null;
 }
@@ -84,21 +72,18 @@ async function getAllTickers(){
 function rsi(values,p=14){
   if(!values || values.length < p+1) return null;
   let g=0,l=0;
-
   for(let i=1;i<=p;i++){
     const d=values[i]-values[i-1];
     d>=0?g+=d:l-=d;
   }
   g/=p; l=(l/p)||1e-9;
   let val=100-100/(1+(g/l));
-
   for(let i=p+1;i<values.length;i++){
     const d=values[i]-values[i-1];
     g=(g*(p-1)+Math.max(d,0))/p;
     l=((l*(p-1)+Math.max(-d,0))/p)||1e-9;
     val=100-100/(1+(g/l));
   }
-
   return val;
 }
 
@@ -116,75 +101,53 @@ function wicks(c){
   if(!c) return {upper:0,lower:0};
   const top=Math.max(c.o,c.c);
   const bot=Math.min(c.o,c.c);
-
   return {
     upper:((c.h-top)/c.c)*100,
     lower:((bot-c.l)/c.c)*100
   };
 }
 
-// ========= UPDATE LIST =========
+// ========= DEGEN LIST (ALIGNE DISCOVERY) =========
 async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
 
   const list = all
-    .filter(t => t.symbol?.endsWith("USDT"))
+    .filter(t => t.symbol?.endsWith("_UMCBL"))
     .filter(t => +t.usdtVolume > 3_000_000)
     .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
-    .slice(0, 40)
+    .slice(0,40)
     .map(t => t.symbol);
 
-  console.log(`[DEGEN] LIST UPDATE → ${list.length} pairs`);
+  console.log("[DEGEN] LIST UPDATE:", list.length, "pairs");
   return list;
 }
 
-// ========= PROCESS PAIR =========
+// ========= PROCESS =========
 async function processDegen(symbol){
-
-  console.log(`\n====== [DEGEN CHECKING] ${symbol} ======`);
-
   const tk = await getTicker(symbol);
+  if(!tk) return null;
 
-  if(!tk){
-    console.log(`[DEGEN] NO DATA FOR ${symbol}`);
-    return null;
-  }
-
-  const last = +(
-    tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN
-  );
-
-  if(!last || Number.isNaN(last)){
-    console.log(`[DEGEN INVALID PRICE] ${symbol}`);
-    return null;
-  }
+  const last = tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? null;
+  if(!last) return null;
 
   const high24 = tk.high24h != null ? +tk.high24h : null;
   const low24  = tk.low24h  != null ? +tk.low24h  : null;
-
   const volaPct = (high24!=null && low24!=null)
     ? ((high24-low24)/last)*100
     : null;
 
-  const [c3m, c15m] = await Promise.all([
+  const [c3m,c15m] = await Promise.all([
     getCandles(symbol,180,120),
     getCandles(symbol,900,120)
   ]);
+  if(!c3m?.length) return null;
 
-  if(!c3m?.length){
-    console.log(`[DEGEN] Missing 3m candles for ${symbol}`);
-    return null;
-  }
-
-  const rsi3  = rsi(c3m.map(x=>x.c));
-  const rsi15 = rsi(c15m.map(x=>x.c));
-
-  const vwp = vwap(c3m.slice(-24));
+  const rsi3 = rsi(c3m.map(x=>x.c));
+  const vwp  = vwap(c3m.slice(-24));
   const priceVsVwap = vwp ? ((last-vwp)/vwp)*100 : 0;
 
   const lastC = c3m[c3m.length-1];
-
   const wick  = wicks(lastC);
 
   const lastVol = lastC.v;
@@ -193,11 +156,9 @@ async function processDegen(symbol){
 
   const depth = await getDepth(symbol);
   let obScore=0,bids=0,asks=0;
-
   if(depth){
     bids = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     asks = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
-
     if(asks>0){
       const r=bids/asks;
       if(r>1.25) obScore=1;
@@ -205,20 +166,9 @@ async function processDegen(symbol){
     }
   }
 
-  console.log(`[DEGEN DATA] ${symbol} | P=${last} | Vola=${volaPct?.toFixed(2)} | volRatio=${volRatio.toFixed(2)} | ΔVWAP=${priceVsVwap.toFixed(2)} | RSI3=${rsi3?.toFixed(2)}`);
-
   return {
-    symbol,
-    last,
-    volaPct,
-    rsi3,
-    rsi15,
-    priceVsVwap,
-    volRatio,
-    obScore,
-    bidsVol:bids,
-    asksVol:asks,
-    wicks:wick
+    symbol,last,volaPct,rsi3,priceVsVwap,
+    volRatio,obScore,bidsVol:bids,asksVol:asks,wicks:wick
   };
 }
 
@@ -226,14 +176,13 @@ async function processDegen(symbol){
 function analyzeCandidate(rec){
   if(!rec) return null;
 
-  if(rec.volRatio < 2.0) return null;
+  if(rec.volRatio < 2) return null;
   if(rec.volaPct < 3 || rec.volaPct > 20) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  if(gap < 0.7 || gap > 3.0) return null;
+  if(gap < 0.6 || gap > 3.0) return null;
 
   let dir=null;
-
   if(rec.priceVsVwap>0){
     if(rec.wicks.upper>1.3) return null;
     if(rec.obScore<0) return null;
@@ -244,15 +193,15 @@ function analyzeCandidate(rec){
     dir="SHORT";
   }
 
-  let score=0;
+  let score = 0;
   score += rec.volRatio>=3 ? 30 : 15;
   score += (gap>=1 && gap<=2.2) ? 20 : 10;
   score += (dir==="LONG"
     ? (rec.rsi3>=55&&rec.rsi3<=75?15:5)
     : (rec.rsi3>=25&&rec.rsi3<=45?15:5)
   );
-
-  if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
+  if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1))
+    score+=15;
 
   if(score<78) return null;
 
@@ -280,14 +229,13 @@ function analyzeCandidate(rec){
     direction:dir,
     score,
     last:rec.last,
-    volaPct:rec.volaPct,
-    priceVsVwap:rec.priceVsVwap,
-    volRatio:rec.volRatio,
-    obRatio: rec.asksVol>0 ? (rec.bidsVol/rec.asksVol).toFixed(2) : "N/A",
-    levier:lev,
     entry:num(entry,decimals),
     sl:num(sl,decimals),
-    tp:num(tp,decimals)
+    tp:num(tp,decimals),
+    volRatio:num(rec.volRatio,2),
+    volaPct:num(rec.volaPct,2),
+    priceVsVwap:num(rec.priceVsVwap,2),
+    levier:lev
   };
 }
 
@@ -316,24 +264,22 @@ function antiSpam(symbol,dir){
   return true;
 }
 
-// ========= SCAN =========
+// ========= MAIN LOOP =========
 async function scanDegen(){
-  const start = Date.now();
-  console.log("🔍 [DEGEN] SCAN STARTED...");
+  console.log("🔍 [DEGEN] SCAN STARTED");
 
-  const now = start;
+  const now = Date.now();
 
-  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
-    DEGEN_SYMBOLS    = await updateDegenList();
+  if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
+    DEGEN_SYMBOLS = await updateDegenList();
     lastSymbolUpdate = now;
   }
 
-  const BATCH = 5;
   const candidates = [];
+  const BATCH = 5;
 
-  for (let i = 0; i < DEGEN_SYMBOLS.length; i += BATCH){
-    const batch = DEGEN_SYMBOLS.slice(i, i + BATCH);
-
+  for(let i=0;i<DEGEN_SYMBOLS.length;i+=BATCH){
+    const batch = DEGEN_SYMBOLS.slice(i,i+BATCH);
     const res = await Promise.all(batch.map(s => processDegen(s)));
 
     for(const r of res){
@@ -344,53 +290,56 @@ async function scanDegen(){
     await sleep(200);
   }
 
-  const duration = Date.now() - start;
-  console.log(`[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${duration} MS | ${candidates.length} SETUP`);
+  console.log(`[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${candidates.length} SETUP`);
 
-  if (!candidates.length) return;
+  if(!candidates.length) return;
 
   const best = candidates.sort((a,b)=>b.score-a.score)[0];
 
-  if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
+  if(now-lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
     console.log(`[DEGEN] COOLDOWN — ${best.symbol}`);
     return;
   }
 
-  if (!antiSpam(best.symbol,best.direction)){
+  if(!antiSpam(best.symbol,best.direction)){
     console.log(`[DEGEN] ANTISPAM — ${best.symbol}`);
     return;
   }
 
+  console.log(`[DEGEN] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`);
+
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v3.1*
+`🎯 *JTF DEGEN v3.0 (Stable)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
 
-📊 Vol Spike: x${num(best.volRatio,2)}
-🌡️ Vola24: ${num(best.volaPct,2)}%
-📉 ΔVWAP: ${num(best.priceVsVwap,2)}%
+📊 Vol Spike: x${best.volRatio}
+🌡️ Vola24: ${best.volaPct}%
+📉 ΔVWAP: ${best.priceVsVwap}%
 
 💰 Prix: ${best.last}
+🏹 Entry: ${best.entry}
+🛑 SL: ${best.sl}
+🎯 TP: ${best.tp}
 
-_Wait for limit — sniper mode._`;
+⚖️ Levier: ${best.levier}
+
+_Wait for sniper limit._`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
 }
 
-// ========= MAIN =========
+// ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN v3.1 On");
-  await sendTelegram("🟢 DEGEN v3.1 On");
+  console.log("🔥 DEGEN v3.0 On");
+  await sendTelegram("🟢 DEGEN v3.0 On");
   while(true){
-    try{
-      await scanDegen();
-    }catch(e){
-      console.log("[DEGEN ERROR]", e);
-    }
+    try{ await scanDegen(); }
+    catch(e){ console.log("[DEGEN ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
