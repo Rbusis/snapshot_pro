@@ -455,6 +455,14 @@ async function scanOnce(){
   const btcRec=snapshots.find(r=>r.symbol==="BTCUSDT_UMCBL");
   if(btcRec && isNoisyMarket(btcRec)) return;
 
+  // ========= DEBUG BTC (toutes les 5 min) =========
+if (btcRec) {
+  console.log(
+    `[BTC DEBUG] last=${btcRec.last} | ΔVWAP=${btcRec.deltaVWAPpct}% | ` +
+    `OI=${btcRec.deltaOIpct}% | RSI15m=${btcRec.rsi["15m"]} | Vola=${btcRec.volaPct}%`
+  );
+}
+
   const candidates=[];
   for(const rec of snapshots){
     const fusion=fuseJDS(rec); if(!fusion) continue;
