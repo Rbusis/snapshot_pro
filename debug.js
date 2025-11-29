@@ -1,9 +1,9 @@
 // debug.js — Full Debug Mode
 
 export const DEBUG = {
-  global: true,       // Debug TOUTES les fonctions de TOUS les bots
-  autoselect: true,   // Debug AUTOSELECT
-  discovery: true,    // Debug DISCOVERY
-  swing: true,        // Debug SWING
-  degen: true         // Debug DEGEN
+  global: false,       // Debug TOUTES les fonctions de TOUS les bots
+  autoselect: false,   // Debug AUTOSELECT
+  discovery: false,    // Debug DISCOVERY
+  swing: false,        // Debug SWING
+  degen: false         // Debug DEGEN
 };
