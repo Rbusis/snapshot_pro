@@ -126,14 +126,15 @@ async function updateDegenList(){
   if(!all?.length) return [];
 
   const lowcaps = all
-    .filter(t =>
-      t.symbol?.endsWith("USDT") &&
-      (+t.usdtVolume > 3_000_000)
-    )
+    .filter(t => t.symbol.endsWith("_UMCBL"))
+    .filter(t => +t.usdtVolume > 3_000_000)
     .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
     .slice(0,30)
     .map(t => t.symbol);
 
+  console.log("[DEGEN] LIST:", lowcaps);
+  return lowcaps;
+}
   // éviter doublons
   return [...new Set(lowcaps)];
 }
