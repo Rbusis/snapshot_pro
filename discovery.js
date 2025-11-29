@@ -1,4 +1,4 @@
-// discovery.js — JTF DISCOVERY v1.8 (Clean Output + API v2 + Debug Control)
+i// discovery.js — JTF DISCOVERY v1.8 (Clean Output + API v2 + Debug Control)
 
 import fetch from "node-fetch";
 import fs from "fs";
@@ -367,7 +367,7 @@ Lev: ${best.levier}`;
 // ========= MAIN =========
 export async function startDiscovery(){
   console.log("🔥 DISCOVERY On");
-  await sendTelegram("🟢 Discovery On");
+  await sendTelegram("🟢 DISCOVERY On");
   while(true){
     try{
       await scanDiscovery();
