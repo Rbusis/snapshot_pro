@@ -3,7 +3,7 @@
 
 import process from "process";
 import fetch from "node-fetch";
-import { DEBUG } from "../index.js";
+import { DEBUG } from "./index.js";
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
