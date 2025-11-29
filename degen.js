@@ -1,220 +1,317 @@
-// degen.js — v1.4 (Clean Output + Debug Control)
-
+// degen.js — JTF DEGEN v1.4 (API v2 + Debug Control + Log B)
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
+
+// ========= DEBUG =========
+function logDebug(...args) {
+  if (DEBUG.global || DEBUG.degen) {
+    console.log("[DEGEN DEBUG]", ...args);
+  }
+}
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS = 2 * 60_000; // Degen = rapide
-const MIN_ALERT_DELAY_MS = 3 * 60_000;
+const SCAN_INTERVAL_MS   = 2 * 60_000;
+const MIN_ALERT_DELAY_MS = 10 * 60_000;
 
-// ========= DEBUG =========
-function logDebug(...args){
-  if (DEBUG.global || DEBUG.degen){
-    console.log("[DEGEN DEBUG]", ...args);
-  }
-}
+let lastAlerts = new Map();
 
-// ========= SYMBOLS =========
-const SYMBOLS = [
-  "BTCUSDT_UMCBL","ETHUSDT_UMCBL","SOLUSDT_UMCBL","BNBUSDT_UMCBL",
-  "AVAXUSDT_UMCBL","DOGEUSDT_UMCBL","XRPUSDT_UMCBL","LINKUSDT_UMCBL",
-  "DOTUSDT_UMCBL","SUIUSDT_UMCBL","WIFUSDT_UMCBL","PEPEUSDT_UMCBL",
-  "TIAUSDT_UMCBL","INJUSDT_UMCBL","APTUSDT_UMCBL","TONUSDT_UMCBL"
-];
-
-// ========= STATE =========
-const lastAlerts = new Map();
-
-// ========= UTIL =========
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const num = (v,d=4)=>v==null?null:+(+v).toFixed(d);
-const baseSymbol = s => s.replace("_UMCBL","");
+// ========= UTILS =========
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const num   = (v, d=4) => v==null ? null : +(+v).toFixed(d);
+const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 
 async function safeGetJson(url){
-  try{
-    const r = await fetch(url, {headers:{Accept:"application/json"}});
+  try {
+    const r = await fetch(url, { headers:{Accept:"application/json"} });
     return r.ok ? await r.json() : null;
-  }catch(e){
-    logDebug("safeGetJson FAIL", url, e);
+  } catch(e){
+    logDebug("safeGetJson ERROR", url, e);
     return null;
   }
 }
 
+// ========= API v2 =========
 async function getTicker(symbol){
   logDebug("getTicker", symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${baseSymbol(symbol)}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
   );
-  return Array.isArray(j?.data) ? j.data[0] : j?.data ?? null;
+  return j?.data ? (Array.isArray(j.data)?j.data[0]:j.data) : null;
 }
 
-async function getCandles(symbol,sec,limit=40){
-  logDebug("getCandles", symbol, sec);
+async function getCandles(symbol, seconds, limit=80){
+  logDebug("getCandles", symbol, seconds);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${baseSymbol(symbol)}&granularity=${sec}&limit=${limit}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
   );
-  return j?.data ? j.data.map(c=>({
+  if (!j?.data?.length) return [];
+  return j.data.map(c => ({
     t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
-  })).sort((a,b)=>a.t-b.t) : [];
+  })).sort((a,b)=>a.t-b.t);
 }
 
-function percent(a,b){
-  return b ? ((a/b)-1)*100 : null;
+async function getDepth(symbol){
+  logDebug("getDepth", symbol);
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`
+  );
+  if(!j?.data) return null;
+  const d = Array.isArray(j.data) ? j.data[0] : j.data;
+  return d?.bids && d?.asks ? d : null;
 }
 
-function closeChange(c,b=1){
-  if(c.length < b+1) return null;
-  return percent(c[c.length-1].c, c[c.length-1-b].c);
-}
-
-function rsi(cl,p=14){
-  if(cl.length<p+1) return null;
+// ========= INDICATORS =========
+function rsi(values,p=14){
+  if(!values || values.length<p+1) return null;
   let g=0,l=0;
   for(let i=1;i<=p;i++){
-    const d=cl[i]-cl[i-1];
-    d>=0 ? g+=d : l-=d;
+    const d = values[i]-values[i-1];
+    d>=0?g+=d:l-=d;
   }
   g/=p; l=(l/p)||1e-9;
-  let rs=g/l; let v=100-100/(1+rs);
-  for(let i=p+1;i<cl.length;i++){
-    const d=cl[i]-cl[i-1];
-    const G=Math.max(d,0), L=Math.max(-d,0);
-    g=(g*(p-1)+G)/p;
-    l=((l*(p-1)+L)/p)||1e-9;
-    rs=g/l; v=100-100/(1+rs);
+  let val = 100 - 100/(1+(g/l));
+
+  for(let i=p+1;i<values.length;i++){
+    const d=values[i]-values[i-1];
+    g=(g*(p-1)+Math.max(d,0))/p;
+    l=((l*(p-1)+Math.max(-d,0))/p)||1e-9;
+    val=100 - 100/(1+(g/l));
   }
-  return v;
+  return val;
 }
 
-// ========= STRONG SETUP DEGEN =========
-// Conditions agressives mais ultra filtrées
-function isDegenSetup(rec){
-  if(!rec) return false;
-
-  const dp1  = rec.dP_1m;
-  const dp5  = rec.dP_5m;
-  const rsi1 = rec.rsi1m;
-
-  // Explosion 1m + cohérence 5m + RSI confirmé
-  if(dp1 > 0.35 && dp5 > 0.20 && rsi1 < 35) return "LONG";
-  if(dp1 < -0.35 && dp5 < -0.20 && rsi1 > 70) return "SHORT";
-
-  return false;
+function vwap(c){
+  let pv=0, v=0;
+  for(const k of c){
+    const p=(k.h+k.l+k.c)/3;
+    pv+=p*k.v;
+    v+=k.v;
+  }
+  return v?pv/v:null;
 }
 
-// ========= PROCESS SYMBOL =========
-async function processSymbol(symbol){
-  logDebug("processSymbol", symbol);
-
-  const [tk,c1m,c5m] = await Promise.all([
-    getTicker(symbol),
-    getCandles(symbol,60,40),
-    getCandles(symbol,300,40)
-  ]);
-
-  if(!tk || !c1m.length || !c5m.length) return null;
-
-  const last = tk.lastPr ?? tk.markPrice ?? tk.last ?? null;
-  const closes1 = c1m.map(x=>x.c);
-
-  const dP1m = closeChange(c1m);
-  const dP5m = closeChange(c5m);
-  const rsi1m = rsi(closes1);
-
+function wicks(c){
+  if(!c) return {upper:0,lower:0};
+  const top = Math.max(c.o,c.c);
+  const bot = Math.min(c.o,c.c);
   return {
-    symbol,
-    last,
-    dP_1m: num(dP1m,3),
-    dP_5m: num(dP5m,3),
-    rsi1m: num(rsi1m,2)
+    upper: ((c.h - top)/c.c)*100,
+    lower: ((bot - c.l)/c.c)*100
   };
 }
 
-// ========= ANTI-SPAM =========
-function shouldSend(symbol,dir){
-  const key = `${symbol}-${dir}`;
-  const now = Date.now();
-  const last = lastAlerts.get(key);
+// ========= PROCESS ONE SYMBOL =========
+async function processDegen(symbol){
+  logDebug("processDegen",symbol);
 
-  if(!last){
-    lastAlerts.set(key,now);
-    return true;
+  const tk = await getTicker(symbol);
+  if(!tk) return null;
+
+  const last =
+    tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN;
+  if(!last || Number.isNaN(last)) return null;
+
+  const high24 = tk.high24h!=null ? +tk.high24h : null;
+  const low24  = tk.low24h!=null ? +tk.low24h  : null;
+
+  const volaPct = (high24!=null && low24!=null)
+    ? ((high24-low24)/last)*100
+    : null;
+
+  const [c3m,c15m] = await Promise.all([
+    getCandles(symbol,180,80),
+    getCandles(symbol,900,80)
+  ]);
+
+  if(!c3m.length) return null;
+
+  const rsi3  = rsi(c3m.map(x=>x.c));
+  const rsi15 = rsi(c15m.map(x=>x.c));
+
+  const vwap3 = vwap(c3m.slice(-20));
+  const priceVsVwap = vwap3 ? ((last-vwap3)/vwap3)*100 : 0;
+
+  const lastC = c3m[c3m.length-1];
+  const wick = wicks(lastC);
+
+  const lastVol = lastC.v;
+  const avgVol  = c3m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
+  const volRatio = avgVol>0 ? lastVol/avgVol : 1;
+
+  const depth = await getDepth(symbol);
+  let obScore=0,bids=0,asks=0;
+
+  if(depth){
+    bids = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
+    asks = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
+    if(asks>0){
+      const r=bids/asks;
+      if(r>1.25) obScore=1;
+      else if(r<0.75) obScore=-1;
+    }
   }
 
-  if(now-last < MIN_ALERT_DELAY_MS) return false;
+  return {
+    symbol,last,volaPct,rsi3,rsi15,priceVsVwap,
+    volRatio,obScore,bidsVol:bids,asksVol:asks,wicks:wick
+  };
+}
 
+// ========= ANALYZE =========
+function analyze(rec){
+  if(!rec) return null;
+
+  if(rec.volRatio < 2.2) return null;
+  if(rec.volaPct < 3 || rec.volaPct > 22) return null;
+
+  const gap=Math.abs(rec.priceVsVwap);
+  if(gap < 0.5 || gap > 3.0) return null;
+
+  let dir=null;
+
+  if(rec.priceVsVwap>0){
+    if(rec.wicks.upper>1.3) return null;
+    if(rec.obScore<0) return null;
+    dir="LONG";
+  } else {
+    if(rec.wicks.lower>1.3) return null;
+    if(rec.obScore>0) return null;
+    dir="SHORT";
+  }
+
+  let score=0;
+  score += rec.volRatio>=3 ? 30 : 15;
+  score += (gap>=1 && gap<=2.2) ? 20 : 10;
+  score += (dir==="LONG"
+    ? (rec.rsi3>=55&&rec.rsi3<=75?15:5)
+    : (rec.rsi3>=25&&rec.rsi3<=45?15:5)
+  );
+  if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
+
+  if(score<78) return null;
+
+  const decimals = rec.last<1?5:3;
+  const gapPc = gap/100;
+
+  const entry = dir==="LONG"
+    ? rec.last*(1-gapPc*0.25)
+    : rec.last*(1+gapPc*0.25);
+
+  const riskPct = clamp((rec.volaPct/5)*2,2,5);
+
+  const sl = dir==="LONG"
+    ? rec.last*(1-riskPct/100)
+    : rec.last*(1+riskPct/100);
+
+  const tp = dir==="LONG"
+    ? rec.last*(1+(riskPct*2)/100)
+    : rec.last*(1-(riskPct*2)/100);
+
+  const lev = riskPct>4 ? "2x" : "3x";
+
+  return {
+    symbol:rec.symbol,
+    direction:dir,
+    score,
+    price:rec.last,
+    entry:num(entry,decimals),
+    sl:num(sl,decimals),
+    tp:num(tp,decimals),
+    volRatio:num(rec.volRatio,1),
+    vola:num(rec.volaPct,1),
+    obRatio: rec.asksVol>0 ? (rec.bidsVol/rec.asksVol).toFixed(2) : "N/A",
+    levier:lev
+  };
+}
+
+// ========= TELEGRAM =========
+async function sendTelegram(msg){
+  if(!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID) return;
+  try{
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:msg,parse_mode:"Markdown"})
+    });
+  }catch{}
+}
+
+function antiSpam(symbol,dir){
+  const key=`${symbol}-${dir}`;
+  const now=Date.now();
+  const last=lastAlerts.get(key);
+  if(last && now-last<MIN_ALERT_DELAY_MS) return false;
   lastAlerts.set(key,now);
   return true;
 }
 
-// ========= TELEGRAM =========
-async function sendTelegram(text){
-  if(!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  try{
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text,parse_mode:"Markdown"})
-    });
-  }catch(e){}
+// ========= MAIN LOOP =========
+async function scanDegen(){
+  const start = Date.now();
+  const SYMBOLS = [
+    "BTCUSDT","ETHUSDT","SOLUSDT","INJUSDT","OPUSDT","ARBUSDT",
+    "SEIUSDT","TIAUSDT","APTUSDT","RNDRUSDT","FETUSDT","AGIXUSDT",
+    "NEARUSDT","ATOMUSDT","AVAXUSDT","DOTUSDT","TRXUSDT"
+  ];
+
+  const results = await Promise.all(
+    SYMBOLS.map(s => processDegen(s))
+  );
+
+  const setups = [];
+  for(const r of results){
+    const s = analyze(r);
+    if(s) setups.push(s);
+  }
+
+  const duration = Date.now() - start;
+
+  // ===== HARMONISED LOG FORMAT =====
+  if(setups.length > 0){
+    console.log(`[DEGEN] ${SYMBOLS.length} pairs | ${setups.length} setup | ${duration} ms`);
+  }
+
+  if(!setups.length) return;
+
+  const best = setups.sort((a,b)=>b.score-a.score)[0];
+
+  // LOG SIGNAL (harmonised)
+  console.log(`[DEGEN] Setup — ${best.symbol} ${best.direction} | Score ${best.score}`);
+
+  if(!antiSpam(best.symbol,best.direction)) return;
+
+  const emoji = best.direction==="LONG" ? "🚀" : "🪂";
+
+  const msg =
+`⚡ *DEGEN v1.4* ⚡
+
+${emoji} *${best.symbol}* — ${best.direction}
+🏅 Score: ${best.score}
+
+💠 Entry: ${best.entry}
+🎯 TP: ${best.tp}
+🛑 SL: ${best.sl}
+
+📊 Vol: x${best.volRatio}
+🌡️ Vola: ${best.vola}%
+📘 OB: ${best.obRatio}
+⚖️ Levier: ${best.levier}`;
+
+  await sendTelegram(msg);
 }
 
-// ========= SCAN =========
-async function scanOnce(){
-  console.log("⚡ DEGEN scan…");
-
-  const snapshots=[];
-  const BATCH = 4;
-
-  for(let i=0;i<SYMBOLS.length;i+=BATCH){
-    const batch = SYMBOLS.slice(i,i+BATCH);
-    const res = await Promise.all(batch.map(s=>processSymbol(s).catch(()=>null)));
-    for(const r of res) if(r) snapshots.push(r);
-    await sleep(300);
-  }
-
-  const signals=[];
-  for(const rec of snapshots){
-    const dir = isDegenSetup(rec);
-    if(dir){
-      signals.push({...rec, direction:dir});
-    }
-  }
-
-  console.log(`DEGEN: ${snapshots.length} pairs | ${signals.length} setups`);
-
-  if(!signals.length) return;
-
-  // Envoi des signaux valides
-  for(const s of signals){
-    if(!shouldSend(s.symbol, s.direction)) continue;
-
-    const emoji = s.direction==="LONG" ? "⚡🚀" : "⚡🪂";
-    const msg =
-`${emoji} ${s.direction} — ${s.symbol}
-
-Entry: ${s.last}
-dP 1m: ${s.dP_1m}%
-dP 5m: ${s.dP_5m}%
-RSI 1m: ${s.rsi1m}`;
-
-    await sendTelegram(msg);
-  }
-}
-
-// ========= MAIN =========
-export async function startDegen(){
-  console.log("🚀 DEGEN v1.4 started.");
-  await sendTelegram("🟢 Degen ON.");
+// ========= START =========
+async function main(){
+  console.log("🔥 DEGEN v1.4 started.");
+  await sendTelegram("🟢 DEGEN v1.4 lancé.");
   while(true){
-    try{
-      await scanOnce();
-    }catch(e){
-      console.log("[DEGEN ERROR]", e);
-    }
+    try{ await scanDegen(); }
+    catch(e){ console.log("[DEGEN ERROR]",e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
+
+export const startDegen = main;
