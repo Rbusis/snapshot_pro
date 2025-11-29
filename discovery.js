@@ -1,4 +1,11 @@
-// discovery.js — JTF DISCOVERY v1.3 + DEBUG CHECK (identique AUTSELECT)
+// discovery.js — JTF DISCOVERY v1.4
+// Midcaps Momentum Scanner — FULL API v2 (100% stable + DEBUG DATA)
+
+// ✅ Logique :
+// - Utilise l’API v2 Bitget (productType=usdt-futures)
+// - Interne : symboles type "XXXXUSDT_UMCBL"
+// - API : utilise baseSymbol("XXXXUSDT_UMCBL") -> "XXXXUSDT"
+// - DEBUG complet sur BTC Trend + chaque paire scannée
 
 import fetch from "node-fetch";
 import fs from "fs";
@@ -17,10 +24,10 @@ const BTC_LONG_MIN  = -0.2;
 const BTC_SHORT_MAX = +0.5;
 
 // État interne
-let DISCOVERY_SYMBOLS = [];
-let lastSymbolUpdate   = 0;
+let DISCOVERY_SYMBOLS   = [];
+let lastSymbolUpdate    = 0;
 let lastGlobalTradeTime = 0;
-const lastAlerts = new Map();
+const lastAlerts        = new Map();
 
 // Fallback midcaps
 const FALLBACK_MIDCAPS = [
@@ -42,20 +49,29 @@ const IGNORE_LIST = [
 const sleep = (ms) => new Promise(r => setTimeout(r,ms));
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const num = (v,d=4)=>v==null?null:+(+v).toFixed(d);
+const baseSymbol = (s) => s.replace("_UMCBL","");
 
 async function safeGetJson(url){
   try{
     const r = await fetch(url, { headers:{Accept:"application/json"} });
-    if(!r.ok) return null;
+    if(!r.ok) {
+      console.log(`[DISCOVERY DEBUG] HTTP ${r.status} sur ${url}`);
+      return null;
+    }
     return await r.json();
-  }catch{ return null; }
+  }catch(e){
+    console.log(`[DISCOVERY DEBUG] Fetch error sur ${url}:`, e.message);
+    return null;
+  }
 }
 
-// ========= API v2 — Uniformisé avec Autoselect =========
+// ========= API v2 — STANDARD UNIFORMISÉ AVEC AUTOSELECT =========
 
+// Candles
 async function getCandles(symbol, seconds, limit=200){
+  const base = baseSymbol(symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${base}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
   );
   if(!j?.data?.length) return [];
   return j.data.map(c => ({
@@ -63,27 +79,34 @@ async function getCandles(symbol, seconds, limit=200){
   })).sort((a,b)=>a.t-b.t);
 }
 
+// Ticker
 async function getTicker(symbol){
+  const base = baseSymbol(symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${base}&productType=usdt-futures`
   );
   return j?.data ?? null;
 }
 
+// Funding (gardé même si non utilisé pour l’instant)
 async function getFunding(symbol){
+  const base = baseSymbol(symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${symbol}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${base}&productType=usdt-futures`
   );
   return j?.data ?? null;
 }
 
+// Depth
 async function getDepth(symbol){
+  const base = baseSymbol(symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/depth?symbol=${symbol}&limit=20&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/depth?symbol=${base}&limit=20&productType=usdt-futures`
   );
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
+// Liste complète des futures v2
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -93,16 +116,29 @@ async function getAllTickers(){
 
 // ========= BTC Trend =========
 async function getBTCTrend(){
-  const c = await getCandles("BTCUSDT_UMCBL", 3600, 5);
-  if(!c?.length) return null;
-  const last = c[c.length-1];
-  return ((last.c - last.o)/last.o)*100;
+  const candles = await getCandles("BTCUSDT_UMCBL", 3600, 5);
+  if(!candles?.length){
+    console.log("[DISCOVERY DEBUG] BTC getCandles(1h) retourne 0 barre.");
+    return null;
+  }
+  const last = candles[candles.length-1];
+  const trend = ((last.c - last.o)/last.o)*100;
+
+  console.log(
+    `[DISCOVERY DEBUG] BTC Trend 1h — o=${last.o} h=${last.h} l=${last.l} c=${last.c} | ` +
+    `Δ%=${num(trend,3)}%`
+  );
+
+  return trend;
 }
 
 // ========= Discovery List =========
 async function updateDiscoveryList(){
   const all = await getAllTickers();
-  if(!all.length) return FALLBACK_MIDCAPS;
+  if(!all.length) {
+    console.log("[DISCOVERY DEBUG] getAllTickers() vide — fallback midcaps.");
+    return FALLBACK_MIDCAPS;
+  }
 
   let list = all.filter(t =>
     t.symbol.endsWith("_UMCBL") &&
@@ -116,7 +152,11 @@ async function updateDiscoveryList(){
 
   try{
     fs.writeFileSync("./config/discovery_list.json", JSON.stringify(midcaps,null,2));
-  }catch{}
+  }catch(e){
+    console.log("[DISCOVERY DEBUG] Impossible d’écrire discovery_list.json (ok si FS read-only).");
+  }
+
+  console.log(`[DISCOVERY DEBUG] DiscoveryList = ${midcaps.length} paires (ou fallback).`);
 
   return midcaps.length ? midcaps : FALLBACK_MIDCAPS;
 }
@@ -125,6 +165,7 @@ async function updateDiscoveryList(){
 function rsi(values,p=14){
   if(!values || values.length < p+1) return null;
   let g=0,l=0;
+
   for(let i=1;i<=p;i++){
     const d = values[i]-values[i-1];
     if(d>=0) g+=d; else l-=d;
@@ -154,6 +195,7 @@ function vwap(c){
   return v?pv/v:null;
 }
 
+// ========= Wicks =========
 function wicks(c){
   if(!c) return {upper:0,lower:0};
   const top = Math.max(c.o,c.c);
@@ -167,23 +209,32 @@ function wicks(c){
 // ========= PROCESS SYMBOL =========
 async function processDiscovery(symbol){
   const tk = await getTicker(symbol);
-  if(!tk) return null;
+  if(!tk) {
+    console.log(`[DISCOVERY DEBUG] ${symbol} -> ticker NULL`);
+    return null;
+  }
 
-  const last = +tk.lastPr || +tk.markPrice || +tk.last || null;
-  if(!last) return null;
+  const last = tk.lastPr ? +tk.lastPr : (tk.markPrice ? +tk.markPrice : (tk.last ? +tk.last : null));
+  if(!last) {
+    console.log(`[DISCOVERY DEBUG] ${symbol} -> last NULL (lastPr/markPrice/last manquants)`);
+    return null;
+  }
 
   const high24 = +tk.high24h;
   const low24  = +tk.low24h;
-  const volaPct = last ? ((high24-low24)/last)*100 : null;
+  const volaPct = last && high24 && low24 ? ((high24-low24)/last)*100 : null;
 
   const [c5m,c15m] = await Promise.all([
     getCandles(symbol,300,100),
     getCandles(symbol,900,100)
   ]);
-  if(!c5m?.length) return null;
+  if(!c5m?.length){
+    console.log(`[DISCOVERY DEBUG] ${symbol} -> candles 5m vides`);
+    return null;
+  }
 
   const rsi5  = rsi(c5m.map(x=>x.c));
-  const rsi15 = rsi(c15m.map(x=>x.c));
+  const rsi15 = c15m?.length ? rsi(c15m.map(x=>x.c)) : null;
 
   const vwap5 = vwap(c5m.slice(-24));
   const priceVsVwap = vwap5 ? ((last-vwap5)/vwap5)*100 : 0;
@@ -262,7 +313,9 @@ function analyze(rec, btc){
 
   const decimals = rec.last < 1 ? 5 : 3;
 
-  const pullback = clamp(gap/4,0.4,1.0);
+  const gapAbs   = Math.abs(rec.priceVsVwap);
+  const pullback = clamp(gapAbs/4,0.4,1.0);
+
   const entry = dir==="LONG"
     ? rec.last*(1-pullback/100)
     : rec.last*(1+pullback/100);
@@ -328,7 +381,7 @@ async function scanDiscovery(){
 
   const btc = await getBTCTrend();
   if(btc==null){
-    console.log("⚠️ BTC Trend unavailable — skipping.");
+    console.log("⚠️ BTC Trend unavailable — skipping Discovery.");
     return;
   }
 
@@ -338,7 +391,7 @@ async function scanDiscovery(){
     console.log(`🔄 Discovery list updated (${DISCOVERY_SYMBOLS.length} pairs).`);
   }
 
-  console.log(`🚀 DISCOVERY v1.3 — BTC=${btc.toFixed(2)}% — Pairs=${DISCOVERY_SYMBOLS.length}`);
+  console.log(`🚀 DISCOVERY v1.4 — BTC=${num(btc,3)}% — Pairs=${DISCOVERY_SYMBOLS.length}`);
 
   const BATCH=5;
   const signals=[];
@@ -347,22 +400,26 @@ async function scanDiscovery(){
     const batch = DISCOVERY_SYMBOLS.slice(i,i+BATCH);
     const res = await Promise.all(batch.map(s=>processDiscovery(s)));
 
-    // ========== DEBUG (comme Autoselect) ==========
-    for(const r of res){
-      if(r){
-        console.log(
-          `[DISCOVERY DEBUG] ${r.symbol} | last=${r.last} | vola=${r.volaPct}` +
-          ` | rsi5=${r.rsi5} | rsi15=${r.rsi15} | volRatio=${r.volRatio}` +
-          ` | priceVsVwap=${r.priceVsVwap} | obScore=${r.obScore}`
-        );
-      }
-    }
-    // ==============================================
+    res.forEach((rec, idx) => {
+      const sym = batch[idx];
 
-    for(const r of res){
-      const s = analyze(r,btc);
+      if(!rec){
+        console.log(`[DISCOVERY DEBUG] ${sym} -> rec=NULL (filtré ou data manquante).`);
+        return;
+      }
+
+      // DEBUG COMPLET PAR PAIRE
+      console.log(
+        `[DISCOVERY DEBUG] ${rec.symbol} | last=${rec.last} | vola=${num(rec.volaPct,2)}% | ` +
+        `rsi5=${num(rec.rsi5,2)} | rsi15=${num(rec.rsi15,2)} | ` +
+        `gapVWAP=${num(rec.priceVsVwap,3)}% | volRatio=x${num(rec.volRatio,2)} | ` +
+        `OB=${rec.obScore} (bids=${rec.bidsVol}, asks=${rec.asksVol}) | ` +
+        `Δ24h=${num(rec.change24,2)}%`
+      );
+
+      const s = analyze(rec,btc);
       if(s) signals.push(s);
-    }
+    });
 
     await sleep(300);
   }
@@ -387,7 +444,7 @@ async function scanDiscovery(){
   const emoji = best.direction==="LONG" ? "🚀" : "🪂";
 
   const msg=
-`⚡ *JTF DISCOVERY v1.3* ⚡
+`⚡ *JTF DISCOVERY v1.4* ⚡
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 *Score:* ${best.score}
@@ -411,8 +468,8 @@ _Momentum Midcaps (API v2)_`;
 
 // ========= START =========
 async function main(){
-  console.log("🔥 Discovery v1.3 (API v2) démarré.");
-  await sendTelegram("🔥 *DISCOVERY v1.3* lancé (API v2).");
+  console.log("🔥 Discovery v1.4 (API v2) démarré.");
+  await sendTelegram("🔥 *DISCOVERY v1.4* lancé (API v2).");
   while(true){
     try{ await scanDiscovery(); }
     catch(e){ console.error("DISCOVERY CRASH:",e); }
