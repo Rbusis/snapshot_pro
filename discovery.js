@@ -1,4 +1,4 @@
-// discovery.js — JTF DISCOVERY v1.6.1 (FULL API v2 FIX)
+// discovery.js — JTF DISCOVERY v1.6.2 (BTC DISABLED — API v2 FULL FIX)
 // Stable — Debug complet — Compatible Railway
 
 import fetch from "node-fetch";
@@ -13,7 +13,7 @@ const MIN_ALERT_DELAY_MS    = 15 * 60_000;
 const GLOBAL_COOLDOWN_MS    = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// BTC sécurité
+// BTC security (DISABLED, kept for future)
 const BTC_LONG_MIN  = -0.2;
 const BTC_SHORT_MAX = +0.5;
 
@@ -67,7 +67,7 @@ async function getCandles(symbol, seconds, limit=200){
   })).sort((a,b)=>a.t-b.t);
 }
 
-// ----------- FIX : Ticker 100% correct -----------
+// Ticker (API v2)
 async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
@@ -75,13 +75,7 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-async function getFunding(symbol){
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${symbol}&productType=usdt-futures`
-  );
-  return j?.data ?? null;
-}
-
+// Depth
 async function getDepth(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/depth?symbol=${symbol}&limit=20&productType=usdt-futures`
@@ -89,7 +83,7 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// All futures list
+// All tickers list
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -97,11 +91,10 @@ async function getAllTickers(){
   return j?.data ?? [];
 }
 
-// ========= BTC TREND =========
+// ========= BTC TREND (DISABLED) =========
 async function getBTCTrend(){
-  const c = await getCandles("BTCUSDT_UMCBL", 3600, 5);  if(!c?.length) return null;
-  const last = c[c.length-1];
-  return ((last.c - last.o)/last.o)*100;
+  // Return dummy BTC trend so Discovery does NOT skip
+  return 0; // Always neutral
 }
 
 // ========= UPDATE DISCOVERY LIST =========
@@ -235,9 +228,11 @@ async function processDiscovery(symbol){
 }
 
 // ========= ANALYZE =========
+// BTC removed → btc argument unused but preserved for compatibility
 function analyze(rec, btc){
-  if(!rec||btc==null) return null;
+  if(!rec) return null;
 
+  // Volume impulse
   if(rec.volRatio < 2) return null;
   if(rec.volaPct < 3 || rec.volaPct > 22) return null;
 
@@ -246,13 +241,12 @@ function analyze(rec, btc){
 
   let dir=null;
 
+  // Direction based only on price vs VWAP
   if(rec.priceVsVwap>0){
-    if(btc < BTC_LONG_MIN) return null;
     if(rec.wicks.upper>1.2) return null;
     if(rec.obScore<0) return null;
     dir="LONG";
   } else {
-    if(btc > BTC_SHORT_MAX) return null;
     if(rec.wicks.lower>1.2) return null;
     if(rec.obScore>0) return null;
     dir="SHORT";
@@ -267,7 +261,8 @@ function analyze(rec, btc){
   );
   if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
   if((dir==="LONG"&&rec.change24>3)||(dir==="SHORT"&&rec.change24<-3)) score+=10;
-  if((dir==="LONG"&&btc>=0)||(dir==="SHORT"&&btc<=0)) score+=10;
+
+  // BTC-neutral boost removed
 
   if(score<78) return null;
 
@@ -336,13 +331,10 @@ function antiSpam(symbol,dir){
 async function scanDiscovery(){
   const now=Date.now();
 
-  const btc = await getBTCTrend();
-  if(btc==null){
-    console.log("⚠ BTC Trend missing — skip");
-    return;
-  }
+  // BTC DISABLED
+  const btc = 0;
 
-  console.log(`🔥 Discovery v1.6.1 — BTC Trend=${btc.toFixed(2)}%`);
+  console.log(`🔥 Discovery v1.6.2 — BTC Trend DISABLED (0%)`);
 
   if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
     DISCOVERY_SYMBOLS = await updateDiscoveryList();
@@ -383,7 +375,7 @@ async function scanDiscovery(){
   const emoji=best.direction==="LONG"?"🚀":"🪂";
 
   const msg=
-`⚡ *JTF DISCOVERY v1.6.1* ⚡
+`⚡ *JTF DISCOVERY v1.6.2* ⚡
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}
@@ -397,7 +389,7 @@ ${emoji} *${best.symbol}* — ${best.direction}
 📘 OB: ${best.obRatio}
 ⚖️ Levier: ${best.levier}
 
-_Momentum Midcaps — API v2 FIXED_`;
+_Momentum Midcaps — BTC Neutral — API v2_`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
@@ -407,8 +399,8 @@ _Momentum Midcaps — API v2 FIXED_`;
 
 // ========= START =========
 async function main(){
-  console.log("🔥 Discovery v1.6.1 — démarré.");
-  await sendTelegram("🟢 Discovery v1.6.1 lancé (API v2 FIX).");
+  console.log("🔥 Discovery v1.6.2 — démarré.");
+  await sendTelegram("🟢 Discovery v1.6.2 lancé (BTC OFF — API v2).");
   while(true){
     try{ await scanDiscovery(); }
     catch(e){ console.error("DISCOVERY CRASH:",e); }
