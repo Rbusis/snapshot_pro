@@ -531,6 +531,61 @@ async function scanOnce(){
       `OI=${btcRec.deltaOIpct}% | RSI15m=${btcRec.rsi["15m"]} | Vola=${btcRec.volaPct}%`
     );
   }
+  if (btcRec) {
+  console.log("===== BTC FULL DATA CHECK =====");
+  console.log("Ticker:");
+  console.log(`  last:       ${btcRec.last}`);
+  console.log(`  markPrice:  ${btcRec.markPrice}`);
+  console.log(`  high24:     ${btcRec.high24}`);
+  console.log(`  low24:      ${btcRec.low24}`);
+  console.log("");
+
+  console.log("Open Interest:");
+  console.log(`  deltaOI:    ${btcRec.deltaOIpct}%`);
+  console.log("");
+
+  console.log("VWAP & Tendances:");
+  console.log(`  deltaVWAP:    ${btcRec.deltaVWAPpct}%`);
+  console.log(`  deltaVWAPg:   ${btcRec.deltaVWAPgPct}%`);
+  console.log(`  tend24:       ${btcRec.tend24}`);
+  console.log(`  posDay:       ${btcRec.posDay}`);
+  console.log("");
+
+  console.log("RSI:");
+  console.log(`  1m:  ${btcRec.rsi["1m"]}`);
+  console.log(`  5m:  ${btcRec.rsi["5m"]}`);
+  console.log(`  15m: ${btcRec.rsi["15m"]}`);
+  console.log(`  1h:  ${btcRec.rsi["1h"]}`);
+  console.log(`  4h:  ${btcRec.rsi["4h"]}`);
+  console.log("");
+
+  console.log("Variations:");
+  console.log(`  15m: ${btcRec.variationPct["15m"]}%`);
+  console.log(`  1h:  ${btcRec.variationPct["1h"]}%`);
+  console.log(`  4h:  ${btcRec.variationPct["4h"]}%`);
+  console.log("");
+
+  console.log("dP (micro-variations):");
+  console.log(`  dP_1m:  ${btcRec.dP_1m}%`);
+  console.log(`  dP_5m:  ${btcRec.dP_5m}%`);
+  console.log(`  dP_15m: ${btcRec.dP_15m}%`);
+  console.log("");
+
+  console.log("Niveaux techniques:");
+  console.log(`  spreadPct: ${btcRec.spreadPct}%`);
+  console.log("");
+
+  console.log("Scoring:");
+  console.log(`  MMS_long:  ${btcRec.MMS_long}`);
+  console.log(`  MMS_short: ${btcRec.MMS_short}`);
+  console.log("");
+
+  console.log("Funding:");
+  console.log(`  fundingRate: ${btcRec.fundingRatePct}%`);
+  console.log("");
+
+  console.log("===== END BTC FULL DATA CHECK =====");
+}
 
   const candidates = [];
   for (const rec of snapshots){
