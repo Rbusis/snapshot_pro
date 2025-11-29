@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v2.8 (STABLE, API v2, sans toApiSymbol)
+// degen.js — JTF DEGEN v2.7 (STABLE + API v2 FIX)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -23,19 +23,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 
-// (optionnel) debug contrôlé par DEBUG.global / DEBUG.degen si tu veux
-function logDebug(...args){
-  if (DEBUG?.global || DEBUG?.degen) {
-    console.log("[DEGEN DEBUG]", ...args);
-  }
+// ========= SYMBOL FIX (API v2) =========
+// IMPORTANT : NE JAMAIS retirer "USDT"
+function toApiSymbol(symbol){
+  console.log(`[DEGEN toApiSymbol] ${symbol} → ${symbol}`);
+  return symbol;
 }
 
+// ========= SAFE FETCH =========
 async function safeGetJson(url){
   try{
-    logDebug("FETCH", url);
+    console.log(`[DEGEN FETCH] ${url}`);
     const r = await fetch(url,{headers:{Accept:"application/json"}});
     if(!r.ok){
-      console.log(`[DEGEN FETCH ERROR] HTTP ${r.status} — ${url}`);
+      console.log(`[DEGEN FETCH ERROR] HTTP ${r.status}`);
       return null;
     }
     const json = await r.json();
@@ -46,13 +47,15 @@ async function safeGetJson(url){
   }
 }
 
-// ========= API v2 (symbol COMPLET, JAMAIS modifié) =========
+// ========= API v2 =========
 async function getTicker(symbol){
-  const url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`;
-  const j = await safeGetJson(url);
+  const apiSymbol = toApiSymbol(symbol);
+  const url = 
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${apiSymbol}&productType=usdt-futures`;
 
+  const j = await safeGetJson(url);
   if(!j?.data){
-    console.log(`[DEGEN getTicker FAIL] ${symbol} - no data`);
+    console.log(`[DEGEN getTicker FAIL] ${symbol}`);
     return null;
   }
 
@@ -61,11 +64,13 @@ async function getTicker(symbol){
 }
 
 async function getCandles(symbol, seconds, limit=120){
-  const url = `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`;
-  const j = await safeGetJson(url);
+  const apiSymbol = toApiSymbol(symbol);
+  const url =
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${apiSymbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`;
 
+  const j = await safeGetJson(url);
   if(!j?.data?.length){
-    logDebug("getCandles FAIL", symbol);
+    console.log(`[DEGEN getCandles FAIL] ${symbol}`);
     return [];
   }
 
@@ -75,10 +80,13 @@ async function getCandles(symbol, seconds, limit=120){
 }
 
 async function getDepth(symbol){
-  const url = `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`;
-  const j = await safeGetJson(url);
+  const apiSymbol = toApiSymbol(symbol);
+  const url =
+    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${apiSymbol}&productType=usdt-futures&limit=20`;
 
+  const j = await safeGetJson(url);
   if(!j?.data) return null;
+
   const d = Array.isArray(j.data)?j.data[0]:j.data;
   return d?.bids && d?.asks ? d : null;
 }
@@ -94,6 +102,7 @@ async function getAllTickers(){
 function rsi(values,p=14){
   if(!values || values.length < p+1) return null;
   let g=0,l=0;
+
   for(let i=1;i<=p;i++){
     const d=values[i]-values[i-1];
     d>=0?g+=d:l-=d;
@@ -130,13 +139,10 @@ function wicks(c){
   };
 }
 
-// ========= LISTE SYMBOLS =========
+// ========= UPDATE LIST =========
 async function updateDegenList(){
   const all = await getAllTickers();
-  if(!all?.length){
-    console.log("[DEGEN] LIST UPDATE FAIL — no tickers");
-    return [];
-  }
+  if(!all?.length) return [];
 
   const list = all
     .filter(t => t.symbol?.endsWith("USDT"))
@@ -145,38 +151,27 @@ async function updateDegenList(){
     .slice(0, 40)
     .map(t => t.symbol);
 
-  console.log("[DEGEN] LIST UPDATE —", list.length, "PAIRS");
-  logDebug("LIST CONTENT:", list);
+  console.log("[DEGEN] LIST:", list);
   return list;
 }
 
-// ========= PROCESS =========
+// ========= PROCESS ONE PAIR =========
 async function processDegen(symbol){
-  logDebug("processDegen START", symbol);
+  console.log(`[DEGEN processDegen START] ${symbol}`);
 
   const tk = await getTicker(symbol);
-  if(!tk){
-    console.log(`[DEGEN] ${symbol} - NO TICKER`);
-    return null;
-  }
+  if(!tk) return null;
 
-  const last = tk.lastPr
-    ? +tk.lastPr
-    : tk.markPrice
-    ? +tk.markPrice
-    : tk.close
-    ? +tk.close
-    : null;
-
+  const last = tk.lastPr ? +tk.lastPr : null;
   if(!last || last <= 0){
-    console.log(`[DEGEN] ${symbol} - INVALID PRICE`, last);
+    console.log(`[DEGEN processDegen] INVALID PRICE ${symbol}`);
     return null;
   }
 
   const high24 = tk.high24h != null ? +tk.high24h : null;
   const low24  = tk.low24h  != null ? +tk.low24h  : null;
 
-  const volaPct = (high24!=null && low24!=null && last>0)
+  const volaPct = (high24!=null && low24!=null)
     ? ((high24-low24)/last)*100
     : null;
 
@@ -185,10 +180,7 @@ async function processDegen(symbol){
     getCandles(symbol,900,120)
   ]);
 
-  if(!c3m?.length || c3m.length < 20){
-    logDebug("insufficient candles", symbol);
-    return null;
-  }
+  if(!c3m?.length || c3m.length < 20) return null;
 
   const rsi3  = rsi(c3m.map(x=>x.c));
   const rsi15 = rsi(c15m.map(x=>x.c));
@@ -216,8 +208,6 @@ async function processDegen(symbol){
     }
   }
 
-  logDebug("processDegen OK", symbol, {volRatio, volaPct, priceVsVwap});
-
   return {
     symbol,
     last,
@@ -233,7 +223,7 @@ async function processDegen(symbol){
   };
 }
 
-// ========= ANALYSE =========
+// ========= ANALYZE =========
 function analyzeCandidate(rec){
   if(!rec) return null;
 
@@ -262,7 +252,8 @@ function analyzeCandidate(rec){
     ? (rec.rsi3>=55&&rec.rsi3<=75?15:5)
     : (rec.rsi3>=25&&rec.rsi3<=45?15:5)
   );
-  if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
+  if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1))
+    score+=15;
 
   if(score<78) return null;
 
@@ -308,11 +299,7 @@ async function sendTelegram(msg){
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        chat_id:TELEGRAM_CHAT_ID,
-        text:msg,
-        parse_mode:"Markdown"
-      })
+      body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text:msg,parse_mode:"Markdown"})
     });
   }catch{}
 }
@@ -326,16 +313,18 @@ function antiSpam(symbol,dir){
   return true;
 }
 
-// ========= MAIN SCAN =========
+// ========= MAIN LOOP =========
 async function scanDegen(){
   const start = Date.now();
   console.log("🔍 [DEGEN] SCAN STARTED...");
 
   const now = start;
 
+  // Update list
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS    = await updateDegenList();
     lastSymbolUpdate = now;
+    console.log(`🔄 [DEGEN] LIST UPDATE — ${DEGEN_SYMBOLS.length} PAIRS`);
   }
 
   const BATCH = 5;
@@ -358,7 +347,9 @@ async function scanDegen(){
   }
 
   const duration = Date.now() - start;
-  console.log(`[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${duration} MS | ${candidates.length} SETUP`);
+  console.log(
+    `[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${duration} MS | ${candidates.length} SETUP`
+  );
 
   if (!candidates.length) return;
 
@@ -374,12 +365,14 @@ async function scanDegen(){
     return;
   }
 
-  console.log(`[DEGEN] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`);
+  console.log(
+    `[DEGEN] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`
+  );
 
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v2.8 (STABLE)*
+`🎯 *JTF DEGEN v2.7 (Stable)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
@@ -390,16 +383,15 @@ ${emoji} *${best.symbol}* — ${best.direction}
 
 💰 Prix: ${best.last}
 
-_Wait for limit — sniper mode._`;
+_Mode sniper – Wait for limit._`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
 }
 
-// ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN On (STABLE)");
-  await sendTelegram("🟢 DEGEN v2.8 On");
+  console.log("🔥 DEGEN v2.7 On");
+  await sendTelegram("🟢 DEGEN v2.7 On");
   while(true){
     try{
       await scanDegen();
