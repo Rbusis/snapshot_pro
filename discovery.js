@@ -99,8 +99,7 @@ async function getAllTickers(){
 
 // ========= BTC TREND =========
 async function getBTCTrend(){
-  const c = await getCandles("BTCUSDT_UMCBL", 3600, 5);
-  if(!c?.length) return null;
+  const c = await getCandles("BTCUSDT_UMCBL", 3600, 5);  if(!c?.length) return null;
   const last = c[c.length-1];
   return ((last.c - last.o)/last.o)*100;
 }
