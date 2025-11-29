@@ -30,7 +30,6 @@ const FALLBACK_MIDCAPS = [
 
 // Éviter les double couvertures
 const IGNORE_LIST = [
-  // Top majors + déjà couverts ailleurs
   "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
   "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
   "LINKUSDT_UMCBL","TONUSDT_UMCBL","SUIUSDT_UMCBL","APTUSDT_UMCBL","NEARUSDT_UMCBL",
@@ -55,9 +54,7 @@ async function safeGetJson(url){
   }
 }
 
-// ========= API v2 ONLY =========
-
-// CANDLES
+// ========= API v2 =========
 async function getCandles(symbol, seconds, limit=100){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -69,7 +66,6 @@ async function getCandles(symbol, seconds, limit=100){
   })).sort((a,b)=>a.t-b.t);
 }
 
-// TICKER
 async function getTicker(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -78,7 +74,6 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-// FUNDING
 async function getFunding(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -87,7 +82,6 @@ async function getFunding(symbol){
   return j?.data ?? null;
 }
 
-// DEPTH
 async function getDepth(symbol){
   const base = baseSymbol(symbol);
   const j = await safeGetJson(
@@ -96,7 +90,6 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// FULL MARKET
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -104,7 +97,7 @@ async function getAllTickers(){
   return j?.data ?? [];
 }
 
-// ========= BTC TREND (RETRY PATTERN) =========
+// ========= BTC TREND =========
 async function getBTCTrend(){
   let attempts = 0;
   while(attempts < 3){
@@ -119,7 +112,7 @@ async function getBTCTrend(){
   return null;
 }
 
-// ========= LISTE MIDCAPS =========
+// ========= DISCOVERY LIST =========
 async function updateDiscoveryList(){
   try {
     const all = await getAllTickers();
@@ -134,7 +127,6 @@ async function updateDiscoveryList(){
     list.sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume));
     const midcaps = list.slice(0,50).map(t=>t.symbol);
 
-    // Sauvegarde locale (Optionnel, ignore erreur si FS en lecture seule)
     try {
       fs.writeFileSync("./config/discovery_list.json", JSON.stringify(midcaps,null,2));
     } catch(e){}
@@ -147,7 +139,6 @@ async function updateDiscoveryList(){
 }
 
 // ========= INDICATEURS =========
-
 function rsi(values,p=14){
   if (!values || values.length < p+1) return null;
   let g=0,l=0;
@@ -193,7 +184,6 @@ function calcWicks(c){
 }
 
 // ========= PROCESS PAIRE =========
-
 async function processDiscovery(symbol){
   const [tk,,depth] = await Promise.all([
     getTicker(symbol),
@@ -248,12 +238,12 @@ async function processDiscovery(symbol){
   };
 }
 
-// ========= ANALYSE LOGIQUE MIDCAP =========
+// ========= ANALYSE LOGIQUE =========
+// (inchangé)
 
 function analyzeCandidate(rec, btc){
   if (!rec || btc==null) return null;
 
-  // HARD FILTERS
   if (rec.volRatio < 2) return null;
   if (rec.volaPct < 3 || rec.volaPct > 22) return null;
 
@@ -276,16 +266,13 @@ function analyzeCandidate(rec, btc){
     direction = "SHORT";
   }
 
-  // SCORING
   let score = 0;
 
-  // Volume
   score += rec.volRatio >= 3 ? 30 : 15;
 
-  // VWAP Gap
-  if (gapAbs >= 1 && gapAbs <= 2.2) score += 20; else score += 10;
+  if (gapAbs >= 1 && gapAbs <= 2.2) score += 20; 
+  else score += 10;
 
-  // RSI
   if (direction==="LONG"){
     if (rec.rsi5>=55 && rec.rsi5<=75) score += 15;
     else score += 5;
@@ -294,24 +281,20 @@ function analyzeCandidate(rec, btc){
     else score += 5;
   }
 
-  // OB
   if ((direction==="LONG" && rec.obScore===1) ||
       (direction==="SHORT" && rec.obScore===-1))
     score += 15;
 
-  // Trend 24h
   if ((direction==="LONG" && rec.change24>3) ||
       (direction==="SHORT" && rec.change24<-3))
     score += 10;
 
-  // BTC Context
   if ((direction==="LONG" && btc>=0) ||
       (direction==="SHORT" && btc<=0))
     score += 10;
 
   if (score < 78) return null;
 
-  // PLAN DE TRADE
   const decimals = rec.last < 1 ? 5 : 3;
   const pullback = clamp(gapAbs/4,0.4,1.0);
 
@@ -353,7 +336,8 @@ function analyzeCandidate(rec, btc){
   };
 }
 
-// ========= TELEGRAM =========
+// ========= TELEGRAM / ANTISPAM =========
+// (inchangé)
 
 async function sendTelegram(text){
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -392,25 +376,43 @@ async function scanDiscovery(){
     return;
   }
 
+  // ========== Mise à jour de la liste ==========
   if (now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
     DISCOVERY_SYMBOLS = await updateDiscoveryList();
     lastSymbolUpdate = now;
-    console.log(`🔄 Discovery list : ${DISCOVERY_SYMBOLS.length} paires.`);
+    console.log(`🔄 Discovery list (${DISCOVERY_SYMBOLS.length}) →`, DISCOVERY_SYMBOLS);
   }
 
   console.log(`🚀 DISCOVERY v1.2 | BTC: ${btc.toFixed(2)}% | Pairs: ${DISCOVERY_SYMBOLS.length}`);
 
   const BATCH = 5;
+  const snapshots = [];
   const candidates = [];
 
   for(let i=0;i<DISCOVERY_SYMBOLS.length;i+=BATCH){
     const batch = DISCOVERY_SYMBOLS.slice(i,i+BATCH);
     const results = await Promise.all(batch.map(s=>processDiscovery(s)));
     for(const r of results){
+      if (r) snapshots.push(r);
       const s = analyzeCandidate(r, btc);
       if(s) candidates.push(s);
     }
     await sleep(300);
+  }
+
+  // ========== DEBUG — 1 TOKEN À CHAQUE CYCLE ==========
+  if (snapshots.length){
+    const d = snapshots[0];
+    console.log("======= DISCOVERY DEBUG =======");
+    console.log(`Symbol: ${d.symbol}`);
+    console.log(`Price: ${d.last}`);
+    console.log(`Vola: ${d.volaPct}%`);
+    console.log(`RSI5: ${d.rsi5}`);
+    console.log(`RSI15: ${d.rsi15}`);
+    console.log(`VWAP Gap: ${d.priceVsVwap}%`);
+    console.log(`VolRatio: ${d.volRatio}`);
+    console.log(`OB Score: ${d.obScore}`);
+    console.log("================================");
   }
 
   if (!candidates.length){
@@ -430,7 +432,6 @@ async function scanDiscovery(){
     return;
   }
 
-  // Envoi
   const emoji = best.direction==="LONG" ? "🚀" : "🪂";
 
   const msg = 
