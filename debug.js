@@ -1,8 +1,8 @@
-// debug.js — Control global du debug
+// debug.js
 export const DEBUG = {
-  global: false,
-  autoselect: false,
-  discovery: false,
-  swing: false,
-  degen: false
+  global: false,      // Active debug pour tous les bots
+  autoselect: false,  // Debug AUTOSELECT
+  discovery: false,   // Debug DISCOVERY
+  swing: false,       // Debug SWING
+  degen: false        // Debug DEGEN
 };
