@@ -1,13 +1,12 @@
-// discovery.js — JTF DISCOVERY v1.7 (API v2 + Debug Control)
-// Stable + Logs Format B + Debug activable via index.js
+// discovery.js — JTF DISCOVERY v1.8 (Clean Output + API v2 + Debug Control)
 
 import fetch from "node-fetch";
 import fs from "fs";
 import { DEBUG } from "./debug.js";
 
-// ========= DEBUG UTIL =========
+// ========= DEBUG =========
 function logDebug(...args){
-  if(DEBUG.global || DEBUG.discovery){
+  if (DEBUG.global || DEBUG.discovery){
     console.log("[DISCOVERY DEBUG]", ...args);
   }
 }
@@ -25,18 +24,13 @@ const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 const BTC_LONG_MIN  = -0.2;
 const BTC_SHORT_MAX = +0.5;
 
+// ========= STATE =========
 let DISCOVERY_SYMBOLS   = [];
 let lastSymbolUpdate    = 0;
 let lastGlobalTradeTime = 0;
 const lastAlerts        = new Map();
 
-// Fallback pairs
-const FALLBACK_MIDCAPS = [
-  "INJUSDT", "FETUSDT", "RNDRUSDT",
-  "ARBUSDT", "AGIXUSDT"
-];
-
-// Exclusion top30
+// ========= BLACKLIST TOP30 =========
 const IGNORE_LIST = [
   "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT",
   "ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","TRXUSDT",
@@ -63,6 +57,14 @@ async function safeGetJson(url){
 }
 
 // ========= API v2 =========
+async function getTicker(symbol){
+  logDebug("getTicker", symbol);
+  const j = await safeGetJson(
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
+  );
+  return j?.data ? (Array.isArray(j.data) ? j.data[0] : j.data) : null;
+}
+
 async function getCandles(symbol, seconds, limit=200){
   logDebug("getCandles", symbol, seconds);
   const j = await safeGetJson(
@@ -72,14 +74,6 @@ async function getCandles(symbol, seconds, limit=200){
   return j.data.map(c=>({
     t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
   })).sort((a,b)=>a.t-b.t);
-}
-
-async function getTicker(symbol){
-  logDebug("getTicker", symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
-  );
-  return j?.data ? (Array.isArray(j.data)?j.data[0]:j.data) : null;
 }
 
 async function getDepth(symbol){
@@ -148,15 +142,15 @@ async function processDiscovery(symbol){
   if(!tk) return null;
 
   const last =
-    (tk.lastPr    ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN);
+    (tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN);
 
   if(!last || Number.isNaN(last)){
-    logDebug("invalid price", symbol);
+    logDebug("invalid last", symbol);
     return null;
   }
 
   const high24 = tk.high24h != null ? +tk.high24h : null;
-  const low24  = tk.low24h  != null ? +tk.low24h : null;
+  const low24  = tk.low24h  != null ? +tk.low24h  : null;
 
   const volaPct = (high24!=null && low24!=null)
     ? ((high24-low24)/last)*100
@@ -168,15 +162,15 @@ async function processDiscovery(symbol){
   ]);
 
   if(!c5m?.length){
-    logDebug("missing candles", symbol);
+    logDebug("missing 5m", symbol);
     return null;
   }
 
   const rsi5  = rsi(c5m.map(x=>x.c));
   const rsi15 = rsi(c15m.map(x=>x.c));
 
-  const vwap5 = vwap(c5m.slice(-24));
-  const priceVsVwap = vwap5 ? ((last-vwap5)/vwap5)*100 : 0;
+  const vwp = vwap(c5m.slice(-24));
+  const priceVsVwap = vwp ? ((last-vwp)/vwp)*100 : 0;
 
   const lastC = c5m[c5m.length-1];
   const wick = wicks(lastC);
@@ -207,7 +201,7 @@ async function processDiscovery(symbol){
 }
 
 // ========= ANALYZE =========
-function analyze(rec,btcTrend){
+function analyze(rec){
   if(!rec) return null;
 
   if(rec.volRatio < 2) return null;
@@ -219,12 +213,10 @@ function analyze(rec,btcTrend){
   let dir=null;
 
   if(rec.priceVsVwap>0){
-    if(btcTrend < BTC_LONG_MIN) return null;
     if(rec.wicks.upper>1.2) return null;
     if(rec.obScore<0) return null;
     dir="LONG";
   } else {
-    if(btcTrend > BTC_SHORT_MAX) return null;
     if(rec.wicks.lower>1.2) return null;
     if(rec.obScore>0) return null;
     dir="SHORT";
@@ -259,7 +251,7 @@ function analyze(rec,btcTrend){
     ? rec.last*(1+(riskPct*2)/100)
     : rec.last*(1-(riskPct*2)/100);
 
-  const lev = riskPct>4?"2x":"3x";
+  const lev = riskPct>4 ? "2x" : "3x";
 
   return {
     symbol:rec.symbol,
@@ -301,13 +293,12 @@ function antiSpam(symbol,dir){
   return true;
 }
 
-// ========= MAIN LOOP =========
+// ========= MAIN SCAN =========
 async function scanDiscovery(){
   const start=Date.now();
-  const now=start;
-  const btcTrend=0;
 
-  // Refresh de la liste
+  // Refresh list
+  const now = start;
   if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
     const all = await getAllTickers();
     let list = all.filter(t =>
@@ -321,31 +312,30 @@ async function scanDiscovery(){
     try{ fs.writeFileSync("./config/discovery_list.json", JSON.stringify(DISCOVERY_SYMBOLS,null,2)); }catch{}
 
     lastSymbolUpdate = now;
-    console.log(`🔄 Discovery list updated (${DISCOVERY_SYMBOLS.length} pairs).`);
+    console.log(`🔄 Discovery list (${DISCOVERY_SYMBOLS.length}) updated.`);
   }
 
+  const results=[];
   const BATCH=5;
-  const signals=[];
 
   for(let i=0;i<DISCOVERY_SYMBOLS.length;i+=BATCH){
     const batch=DISCOVERY_SYMBOLS.slice(i,i+BATCH);
     const res = await Promise.all(batch.map(s=>processDiscovery(s)));
     for(const r of res){
-      const s = analyze(r,btcTrend);
-      if(s) signals.push(s);
+      const s=analyze(r);
+      if(s) results.push(s);
     }
     await sleep(200);
   }
 
-  const duration = Date.now()-start;
+  const duration=Date.now()-start;
 
-  // HEARTBEAT
-  if(!signals.length){
-    console.log(`[DISCOVERY] Scan — 0 signal | ${DISCOVERY_SYMBOLS.length} pairs | ${duration} ms`);
-    return;
-  }
+  // Logged output PRO format
+  console.log(`[DISCOVERY] Scan — ${DISCOVERY_SYMBOLS.length} pairs | ${duration} ms | ${results.length} setups`);
 
-  const best = signals.sort((a,b)=>b.score-a.score)[0];
+  if(!results.length) return;
+
+  const best = results.sort((a,b)=>b.score-a.score)[0];
 
   if(now-lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
     console.log(`[DISCOVERY] Cooldown — ${best.symbol}`);
@@ -357,38 +347,33 @@ async function scanDiscovery(){
     return;
   }
 
-  console.log(`[DISCOVERY] SIGNAL — ${best.symbol} ${best.direction} | Score ${best.score}`);
-
   const emoji = best.direction==="LONG" ? "🚀" : "🪂";
-
   const msg =
-`⚡ *JTF DISCOVERY v1.7* ⚡
+`${emoji} ${best.direction} — ${best.symbol}
 
-${emoji} *${best.symbol}* — ${best.direction}
-🏅 Score: ${best.score}
+Entry: ${best.limitEntry}
+TP: ${best.tp}
+SL: ${best.sl}
 
-💠 Entry: ${best.limitEntry}
-🎯 TP: ${best.tp}
-🛑 SL: ${best.sl}
-
-📊 Vol: x${best.volRatio}
-🌡️ Vola: ${best.vola}%
-📘 OB: ${best.obRatio}
-⚖️ Levier: ${best.levier}`;
+Vol: x${best.volRatio}
+Vola: ${best.vola}%
+OB: ${best.obRatio}
+Lev: ${best.levier}`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
 }
 
-// ========= START =========
-async function main(){
-  console.log("🔥 Discovery v1.7 started.");
-  await sendTelegram("🟢 Discovery v1.7 lancé.");
+// ========= MAIN =========
+export async function startDiscovery(){
+  console.log("🔥 Discovery v1.8 started.");
+  await sendTelegram("🟢 Discovery ON.");
   while(true){
-    try{ await scanDiscovery(); }
-    catch(e){ console.log("[DISCOVERY ERROR]",e); }
+    try{
+      await scanDiscovery();
+    }catch(e){
+      console.log("[DISCOVERY ERROR]",e);
+    }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
-
-export const startDiscovery = main;
