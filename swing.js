@@ -1,7 +1,7 @@
 // swing.js — JTF SWING BOT v1.5 (API v2 FIX + Debug Control + Clean Logs)
 
 import fetch from "node-fetch";
-import { DEBUG } from "../index.js";
+import { DEBUG } from "./index.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
