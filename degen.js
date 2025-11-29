@@ -301,30 +301,45 @@ function antiSpam(symbol,dir){
 async function scanDegen(){
   const now = Date.now();
 
-  if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
+  // Mise à jour liste
+  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS = await updateDegenList();
     lastSymbolUpdate = now;
   }
 
-  const BATCH=5;
-  const candidates=[];
+  const BATCH = 5;
+  const candidates = [];
 
-  for(let i=0;i<DEGEN_SYMBOLS.length;i+=BATCH){
-    const batch = DEGEN_SYMBOLS.slice(i,i+BATCH);
-    const results = await Promise.all(batch.map(s=>processDegen(s)));
-    for(const r of results){
+  for (let i = 0; i < DEGEN_SYMBOLS.length; i += BATCH){
+    const batch = DEGEN_SYMBOLS.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map(s => processDegen(s)));
+    for (const r of results){
       const s = analyzeCandidate(r);
-      if(s) candidates.push(s);
+      if (s) candidates.push(s);
     }
     await sleep(200);
   }
 
-  if(!candidates.length) return;
+  // 🎯 HEARTBEAT LOG — indique que DEGEN tourne bien
+  if (!candidates.length){
+    console.log(`[DEGEN] Scan OK — 0 signal`);
+    return;
+  }
 
-  const best = candidates.sort((a,b)=>b.score-a.score)[0];
+  // Un signal a été trouvé
+  const best = candidates.sort((a,b)=>b.score - a.score)[0];
 
-  if(now-lastGlobalTradeTime < GLOBAL_COOLDOWN_MS) return;
-  if(!antiSpam(best.symbol,best.direction)) return;
+  if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
+    console.log(`[DEGEN] Cooldown — Signal ignoré (${best.symbol})`);
+    return;
+  }
+
+  if (!antiSpam(best.symbol, best.direction)){
+    console.log(`[DEGEN] Anti-spam — ignoré (${best.symbol})`);
+    return;
+  }
+
+  console.log(`[DEGEN] SIGNAL — ${best.symbol} ${best.direction} (Score ${best.score})`);
 
   const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
