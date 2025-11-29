@@ -194,6 +194,8 @@ async function processDegen(symbol){
     }
   }
 
+console.log("[LIST DEBUG]", lowcaps.slice(0, 30));
+
   return {
     symbol,
     last,
