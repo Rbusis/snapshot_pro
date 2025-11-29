@@ -1,5 +1,4 @@
-// discovery.js — JTF DISCOVERY v1.3
-// Midcaps Momentum Scanner — FULL API v2 (100% stable)
+// discovery.js — JTF DISCOVERY v1.3 + DEBUG CHECK (identique AUTSELECT)
 
 import fetch from "node-fetch";
 import fs from "fs";
@@ -52,9 +51,8 @@ async function safeGetJson(url){
   }catch{ return null; }
 }
 
-// ========= API v2 — STANDARD UNIFORMISÉ AVEC AUTOSELECT =========
+// ========= API v2 — Uniformisé avec Autoselect =========
 
-// Candles
 async function getCandles(symbol, seconds, limit=200){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
@@ -65,7 +63,6 @@ async function getCandles(symbol, seconds, limit=200){
   })).sort((a,b)=>a.t-b.t);
 }
 
-// Ticker — FIX MAJEUR (utilise symbol COMPLET)
 async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
@@ -73,7 +70,6 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-// Funding
 async function getFunding(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${symbol}&productType=usdt-futures`
@@ -81,7 +77,6 @@ async function getFunding(symbol){
   return j?.data ?? null;
 }
 
-// Depth
 async function getDepth(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/depth?symbol=${symbol}&limit=20&productType=usdt-futures`
@@ -89,7 +84,6 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// Liste complète des futures v2
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -131,7 +125,6 @@ async function updateDiscoveryList(){
 function rsi(values,p=14){
   if(!values || values.length < p+1) return null;
   let g=0,l=0;
-
   for(let i=1;i<=p;i++){
     const d = values[i]-values[i-1];
     if(d>=0) g+=d; else l-=d;
@@ -161,7 +154,6 @@ function vwap(c){
   return v?pv/v:null;
 }
 
-// ========= Wicks =========
 function wicks(c){
   if(!c) return {upper:0,lower:0};
   const top = Math.max(c.o,c.c);
@@ -354,10 +346,24 @@ async function scanDiscovery(){
   for(let i=0;i<DISCOVERY_SYMBOLS.length;i+=BATCH){
     const batch = DISCOVERY_SYMBOLS.slice(i,i+BATCH);
     const res = await Promise.all(batch.map(s=>processDiscovery(s)));
+
+    // ========== DEBUG (comme Autoselect) ==========
+    for(const r of res){
+      if(r){
+        console.log(
+          `[DISCOVERY DEBUG] ${r.symbol} | last=${r.last} | vola=${r.volaPct}` +
+          ` | rsi5=${r.rsi5} | rsi15=${r.rsi15} | volRatio=${r.volRatio}` +
+          ` | priceVsVwap=${r.priceVsVwap} | obScore=${r.obScore}`
+        );
+      }
+    }
+    // ==============================================
+
     for(const r of res){
       const s = analyze(r,btc);
       if(s) signals.push(s);
     }
+
     await sleep(300);
   }
 
