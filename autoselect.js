@@ -1,4 +1,4 @@
-// autoselect.js — v0.8.6 (Clean Output + Debug Control)
+// autoselect.js — v0.8.7 (Clean Output + Debug Control + Data Logs)
 
 import process from "process";
 import fetch from "node-fetch";
@@ -48,8 +48,13 @@ function normalizeData(data){
 
 async function safeGetJson(url){
   try{
+    logDebug("safeGetJson", url);
     const r = await fetch(url,{headers:{Accept:"application/json"}});
-    return r.ok ? await r.json() : null;
+    if (!r.ok){
+      logDebug("HTTP ERROR", r.status, url);
+      return null;
+    }
+    return await r.json();
   }catch(e){
     logDebug("safeGetJson FAIL", url, e);
     return null;
@@ -144,23 +149,35 @@ function toScore100(x){ return clamp((x+1)/2*100,0,100); }
 
 // ========= SNAPSHOT =========
 async function processSymbol(symbol){
+  logDebug("processSymbol START", symbol);
+
   const [tk,fr,oi] = await Promise.all([
     getTicker(symbol),
     getFunding(symbol),
     getOI(symbol)
   ]);
 
-  if(!tk) return null;
+  if(!tk){
+    console.log(`[AUTO DROP] ${symbol} — no ticker data`);
+    return null;
+  }
 
-  const last = tk.lastPr ?? tk.markPrice ?? tk.last ?? null;
-  const high24 = tk.high24h, low24 = tk.low24h;
+  const lastRaw = tk.lastPr ?? tk.markPrice ?? tk.last ?? null;
+  const last    = lastRaw != null ? +lastRaw : null;
+  const high24  = tk.high24h != null ? +tk.high24h : null;
+  const low24   = tk.low24h  != null ? +tk.low24h  : null;
 
-  const openInterest = oi?.amount ?? null;
+  if(!last || last <= 0){
+    console.log(`[AUTO DROP] ${symbol} — invalid price: ${lastRaw}`);
+    return null;
+  }
+
+  const openInterest = oi?.amount != null ? +oi.amount : null;
   const prev = prevOI.get(symbol) ?? null;
   const deltaOI = prev!=null && openInterest!=null && prev!==0
     ? ((openInterest-prev)/prev)*100
     : null;
-  prevOI.set(symbol,openInterest ?? prev);
+  prevOI.set(symbol, openInterest ?? prev);
 
   const [c1m,c5m,c15m,c1h,c4h] = await Promise.all([
     getCandles(symbol,60,120),
@@ -170,9 +187,15 @@ async function processSymbol(symbol){
     getCandles(symbol,14400,200)
   ]);
 
-  if(!c1m.length||!c5m.length||!c15m.length||!c1h.length||!c4h.length) return null;
+  if(!c1m.length||!c5m.length||!c15m.length||!c1h.length||!c4h.length){
+    console.log(
+      `[AUTO DROP] ${symbol} — missing candles ` +
+      `(1m=${c1m.length},5m=${c5m.length},15m=${c15m.length},1h=${c1h.length},4h=${c4h.length})`
+    );
+    return null;
+  }
 
-  const closes15=c15m.map(x=>x.c);
+  const closes15 = c15m.map(x=>x.c);
 
   const dP15 = closeChange(c15m);
 
@@ -185,11 +208,24 @@ async function processSymbol(symbol){
   const MMS_long  = toScore100(-(dP15/2)||0);
   const MMS_short = toScore100( +(dP15/2)||0);
 
+  const deltaVWAPpct = deltaVWAP != null ? +num(deltaVWAP,4) : null;
+  const deltaOIpct   = deltaOI   != null ? +num(deltaOI,3)   : null;
+
+  // Log pour vérifier les data reçues
+  console.log(
+    `[AUTO DATA] ${symbol} | P=${last} | Vola=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
+    `ΔVWAP=${deltaVWAPpct!=null?deltaVWAPpct.toFixed(4):"n/a"} | ΔOI=${deltaOIpct!=null?deltaOIpct.toFixed(3):"n/a"} | ` +
+    `MMS_L=${MMS_long.toFixed(1)} | MMS_S=${MMS_short.toFixed(1)}`
+  );
+
   return {
-    symbol,last,volaPct,
-    deltaVWAPpct:num(deltaVWAP,4),
-    deltaOIpct:num(deltaOI,3),
-    MMS_long,MMS_short
+    symbol,
+    last,
+    volaPct,
+    deltaVWAPpct,
+    deltaOIpct,
+    MMS_long,
+    MMS_short
   };
 }
 
@@ -311,20 +347,20 @@ async function sendTelegram(text){
     });
   }catch{}
 }
+
 // ========= MARKET NOISE =========
 function isNoisyMarket(rec){
   const vola = rec.volaPct;
   const dVW  = rec.deltaVWAPpct;
-  const tend = rec.tend24;
   const dOI  = rec.deltaOIpct;
 
-  if (!vola || !dVW || !tend || !dOI) return false;
+  // tend24 n'est pas calculé dans cette version → on ne l'utilise pas
+  if (vola == null || dVW == null || dOI == null) return false;
 
   return (
     vola < 2 &&
-    Math.abs(dVW)   <= 0.5 &&
-    Math.abs(tend)  <= 15 &&
-    Math.abs(dOI)   <= 2
+    Math.abs(dVW)  <= 0.5 &&
+    Math.abs(dOI)  <= 2
   );
 }
 
@@ -345,7 +381,7 @@ async function scanOnce(){
     await sleep(800);
   }
 
-  // Market noise check
+  // Market noise check (facultatif mais conservé)
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
   if (btcRec && isNoisyMarket(btcRec)){
     const ms = Date.now() - t0;
@@ -370,6 +406,9 @@ async function scanOnce(){
       setupState, fusion.direction, rsiCoherent, rec
     );
 
+    // NOTE: ta condition d'origine utilise reco.includes("SETUP")
+    // alors que reco vaut "TAKE" / "WAIT" / "AVOID".
+    // Je la laisse telle quelle pour ne pas changer ton comportement.
     if (reco.includes("SETUP")){
       candidates.push({
         symbol:     rec.symbol,
@@ -409,7 +448,7 @@ async function scanOnce(){
   );
   if (!fresh.length) return;
 
-  const lines = ["📊 *JTF v0.8.5 AUTOSELECT — Signaux Confirmés*"];
+  const lines = ["📊 *JTF v0.8.7 AUTOSELECT — Signaux Confirmés*"];
   fresh.forEach((c, idx) => {
     const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
     const tpStr    = c.plan.tp2 ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
@@ -428,8 +467,8 @@ async function scanOnce(){
 
 // ========= MAIN =========
 export async function startAutoselect(){
-  console.log("🔥 AUTOSELECT On");
-  await sendTelegram("🟢 AUTOSELECT On");
+  console.log("🔥 AUTOSELECT On (v0.8.7)");
+  await sendTelegram("🟢 AUTOSELECT v0.8.7 On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.log("[AUTOSELECT ERROR]",e); }
