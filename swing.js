@@ -359,8 +359,8 @@ JDS: ${best.jds}`;
 
 // ========= MAIN LOOP =========
 export async function startSwing(){
-  console.log("🔥 SWING v1.5 started.");
-  await sendTelegram("🟢 Swing ON.");
+  console.log("🔥 SWING On");
+  await sendTelegram("🟢 SWING On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.error("[SWING ERROR]",e); }
