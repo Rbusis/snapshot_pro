@@ -1,382 +1,220 @@
-// degen.js — JTF DEGEN v1.4 (API v2 + Debug Control)
-// Ultra-Sniper Lowcaps — stable, silencieux sauf debug activé
+// degen.js — v1.4 (Clean Output + Debug Control)
 
 import fetch from "node-fetch";
-import fs from "fs";
 import { DEBUG } from "./debug.js";
 
-// ========= DEBUG UTIL =========
+// ========= CONFIG =========
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
+
+const SCAN_INTERVAL_MS = 2 * 60_000; // Degen = rapide
+const MIN_ALERT_DELAY_MS = 3 * 60_000;
+
+// ========= DEBUG =========
 function logDebug(...args){
   if (DEBUG.global || DEBUG.degen){
     console.log("[DEGEN DEBUG]", ...args);
   }
 }
 
-// ========= LOAD JSON =========
-function loadJson(path){
-  try{
-    if(fs.existsSync(path)){
-      return JSON.parse(fs.readFileSync(path,"utf8"));
-    }
-  }catch{}
-  return [];
-}
-
-const top30     = loadJson("./config/top30.json");
-const discovery = loadJson("./config/discovery_list.json");
-
-// ========= CONFIG =========
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
-
-const SCAN_INTERVAL_MS       = 5 * 60_000;
-const MIN_ALERT_DELAY_MS     = 15 * 60_000;
-const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
-const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
+// ========= SYMBOLS =========
+const SYMBOLS = [
+  "BTCUSDT_UMCBL","ETHUSDT_UMCBL","SOLUSDT_UMCBL","BNBUSDT_UMCBL",
+  "AVAXUSDT_UMCBL","DOGEUSDT_UMCBL","XRPUSDT_UMCBL","LINKUSDT_UMCBL",
+  "DOTUSDT_UMCBL","SUIUSDT_UMCBL","WIFUSDT_UMCBL","PEPEUSDT_UMCBL",
+  "TIAUSDT_UMCBL","INJUSDT_UMCBL","APTUSDT_UMCBL","TONUSDT_UMCBL"
+];
 
 // ========= STATE =========
-let DEGEN_SYMBOLS      = [];
-let lastSymbolUpdate   = 0;
-let lastGlobalTradeTime = 0;
-const lastAlerts       = new Map();
+const lastAlerts = new Map();
 
-// ========= UTILS =========
-const sleep = ms => new Promise(r=>setTimeout(r,ms));
-const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
-const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
+// ========= UTIL =========
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const num = (v,d=4)=>v==null?null:+(+v).toFixed(d);
+const baseSymbol = s => s.replace("_UMCBL","");
 
 async function safeGetJson(url){
   try{
-    const r = await fetch(url,{headers:{Accept:"application/json"}});
-    if(!r.ok) return null;
-    return await r.json();
-  }catch{
+    const r = await fetch(url, {headers:{Accept:"application/json"}});
+    return r.ok ? await r.json() : null;
+  }catch(e){
+    logDebug("safeGetJson FAIL", url, e);
     return null;
   }
 }
 
-// ========= API v2 =========
 async function getTicker(symbol){
   logDebug("getTicker", symbol);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${baseSymbol(symbol)}&productType=usdt-futures`
   );
-  return j?.data ? (Array.isArray(j.data) ? j.data[0] : j.data) : null;
+  return Array.isArray(j?.data) ? j.data[0] : j?.data ?? null;
 }
 
-async function getCandles(symbol, seconds, limit=200){
-  logDebug("getCandles", symbol, seconds);
+async function getCandles(symbol,sec,limit=40){
+  logDebug("getCandles", symbol, sec);
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${baseSymbol(symbol)}&granularity=${sec}&limit=${limit}&productType=usdt-futures`
   );
-  if(!j?.data?.length) return [];
-  return j.data.map(c=>({
+  return j?.data ? j.data.map(c=>({
     t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
-  })).sort((a,b)=>a.t-b.t);
+  })).sort((a,b)=>a.t-b.t) : [];
 }
 
-async function getDepth(symbol){
-  logDebug("getDepth", symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`
-  );
-  if(!j?.data) return null;
-  const d = Array.isArray(j.data) ? j.data[0] : j.data;
-  return d?.bids && d?.asks ? d : null;
+function percent(a,b){
+  return b ? ((a/b)-1)*100 : null;
 }
 
-async function getAllTickers(){
-  logDebug("getAllTickers()");
-  const j = await safeGetJson(
-    "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-  );
-  return j?.data ?? [];
+function closeChange(c,b=1){
+  if(c.length < b+1) return null;
+  return percent(c[c.length-1].c, c[c.length-1-b].c);
 }
 
-// ========= INDICATORS =========
-function rsi(values,p=14){
-  if(!values || values.length<p+1) return null;
+function rsi(cl,p=14){
+  if(cl.length<p+1) return null;
   let g=0,l=0;
   for(let i=1;i<=p;i++){
-    const d=values[i]-values[i-1];
-    d>=0?g+=d:l-=d;
+    const d=cl[i]-cl[i-1];
+    d>=0 ? g+=d : l-=d;
   }
   g/=p; l=(l/p)||1e-9;
-  let val = 100 - 100/(1+(g/l));
-  for(let i=p+1;i<values.length;i++){
-    const d=values[i]-values[i-1];
-    g=(g*(p-1)+Math.max(d,0))/p;
-    l=((l*(p-1)+Math.max(-d,0))/p)||1e-9;
-    val = 100 - 100/(1+(g/l));
+  let rs=g/l; let v=100-100/(1+rs);
+  for(let i=p+1;i<cl.length;i++){
+    const d=cl[i]-cl[i-1];
+    const G=Math.max(d,0), L=Math.max(-d,0);
+    g=(g*(p-1)+G)/p;
+    l=((l*(p-1)+L)/p)||1e-9;
+    rs=g/l; v=100-100/(1+rs);
   }
-  return val;
+  return v;
 }
 
-function vwap(c){
-  let pv=0,v=0;
-  for(const k of c){
-    const p=(k.h+k.l+k.c)/3;
-    pv+=p*k.v;
-    v+=k.v;
-  }
-  return v?pv/v:null;
+// ========= STRONG SETUP DEGEN =========
+// Conditions agressives mais ultra filtrées
+function isDegenSetup(rec){
+  if(!rec) return false;
+
+  const dp1  = rec.dP_1m;
+  const dp5  = rec.dP_5m;
+  const rsi1 = rec.rsi1m;
+
+  // Explosion 1m + cohérence 5m + RSI confirmé
+  if(dp1 > 0.35 && dp5 > 0.20 && rsi1 < 35) return "LONG";
+  if(dp1 < -0.35 && dp5 < -0.20 && rsi1 > 70) return "SHORT";
+
+  return false;
 }
 
-function calcWicks(c){
-  if(!c) return {upper:0,lower:0};
-  const top=Math.max(c.o,c.c);
-  const bot=Math.min(c.o,c.c);
-  return {
-    upper:((c.h-top)/c.c)*100,
-    lower:((bot-c.l)/c.c)*100
-  };
-}
+// ========= PROCESS SYMBOL =========
+async function processSymbol(symbol){
+  logDebug("processSymbol", symbol);
 
-// ========= UPDATE LIST =========
-async function updateDegenList(){
-  logDebug("updateDegenList()");
-  const all = await getAllTickers();
-  if(!all?.length) return [];
-
-  let lowcaps = all
-    .filter(t =>
-      t.symbol?.endsWith("USDT") &&
-      !top30.includes(t.symbol) &&
-      !discovery.includes(t.symbol) &&
-      (+t.usdtVolume > 3_000_000)
-    )
-    .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
-    .slice(0,30)
-    .map(t=>t.symbol);
-
-  logDebug("List:", lowcaps.length, "pairs");
-  return lowcaps;
-}
-
-// ========= PROCESS PAIR =========
-async function processDegen(symbol){
-  logDebug("processDegen", symbol);
-
-  const tk = await getTicker(symbol);
-  if(!tk) return logDebug("no ticker → skip"), null;
-
-  const last =
-    (tk.lastPr    != null ? +tk.lastPr    : NaN) ||
-    (tk.markPrice != null ? +tk.markPrice : NaN) ||
-    (tk.close     != null ? +tk.close     : NaN) ||
-    (tk.last      != null ? +tk.last      : NaN);
-
-  if(!last || Number.isNaN(last))
-    return logDebug(symbol, "invalid price"), null;
-
-  const high24 = tk.high24h!=null?+tk.high24h:null;
-  const low24  = tk.low24h !=null?+tk.low24h :null;
-  const volaPct = (high24!=null && low24!=null)
-    ? ((high24-low24)/last)*100 : null;
-
-  const change24 = tk.change24h!=null ? +tk.change24h : 0;
-
-  const [c5m,c15m] = await Promise.all([
-    getCandles(symbol,300,100),
-    getCandles(symbol,900,100)
+  const [tk,c1m,c5m] = await Promise.all([
+    getTicker(symbol),
+    getCandles(symbol,60,40),
+    getCandles(symbol,300,40)
   ]);
 
-  if(!c5m?.length || !c15m?.length)
-    return logDebug(symbol, "missing candles"), null;
+  if(!tk || !c1m.length || !c5m.length) return null;
 
-  const rsi5  = rsi(c5m.map(x=>x.c));
-  const rsi15 = rsi(c15m.map(x=>x.c));
+  const last = tk.lastPr ?? tk.markPrice ?? tk.last ?? null;
+  const closes1 = c1m.map(x=>x.c);
 
-  const vwap5 = vwap(c5m.slice(-24));
-  const priceVsVwap = vwap5 ? ((last-vwap5)/vwap5)*100 : 0;
-
-  const L = c5m[c5m.length-1];
-  const w = calcWicks(L);
-  const lastVol = L.v;
-  const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
-  const volRatio = avgVol>0 ? lastVol/avgVol : 1;
-
-  const depth = await getDepth(symbol);
-  let obScore=0, bids=0, asks=0;
-
-  if(depth){
-    bids = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
-    asks = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
-    if(asks>0){
-      const r=bids/asks;
-      if(r>1.25) obScore=1;
-      else if(r<0.75) obScore=-1;
-    }
-  }
+  const dP1m = closeChange(c1m);
+  const dP5m = closeChange(c5m);
+  const rsi1m = rsi(closes1);
 
   return {
-    symbol,last,volaPct,change24,
-    rsi5,rsi15,priceVsVwap,volRatio,
-    wicks:w,obScore,bidsVol:bids,asksVol:asks
+    symbol,
+    last,
+    dP_1m: num(dP1m,3),
+    dP_5m: num(dP5m,3),
+    rsi1m: num(rsi1m,2)
   };
 }
 
-// ========= ANALYZE =========
-function analyzeCandidate(rec){
-  if(!rec) return null;
-  let before = rec.volRatio;
+// ========= ANTI-SPAM =========
+function shouldSend(symbol,dir){
+  const key = `${symbol}-${dir}`;
+  const now = Date.now();
+  const last = lastAlerts.get(key);
 
-  // Filtre strict
-  if(rec.volRatio < 3.5) return null;
-  if(rec.volaPct < 4 || rec.volaPct > 25) return null;
-
-  const gap = Math.abs(rec.priceVsVwap);
-  if(gap < 1.0 || gap > 3.5) return null;
-
-  let direction = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
-
-  if(direction==="LONG"){
-    if(rec.rsi5<50||rec.rsi5>75) return null;
-    if(rec.rsi15<45||rec.rsi15>70) return null;
-    if(rec.wicks.upper>1.2) return null;
-    if(rec.obScore<0) return null;
-  } else {
-    if(rec.rsi5<25||rec.rsi5>50) return null;
-    if(rec.rsi15<30||rec.rsi15>55) return null;
-    if(rec.wicks.lower>1.2) return null;
-    if(rec.obScore>0) return null;
+  if(!last){
+    lastAlerts.set(key,now);
+    return true;
   }
 
-  let score=0;
-  score += clamp(10+(rec.volRatio-3.5)*8,0,30);
-  score += (gap>=1.2&&gap<=2.4)?20:12;
+  if(now-last < MIN_ALERT_DELAY_MS) return false;
 
-  score += direction==="LONG"
-    ? (rec.rsi5>=55&&rec.rsi5<=70&&rec.rsi15>=50&&rec.rsi15<=65?15:7)
-    : (rec.rsi5>=30&&rec.rsi5<=45&&rec.rsi15>=35&&rec.rsi15<=50?15:7);
-
-  const obRatio = rec.asksVol>0 ? rec.bidsVol/rec.asksVol : 1;
-
-  if(direction==="LONG"){
-    if(rec.obScore===1 && obRatio>=1.3) score+=15;
-    else if(rec.obScore===1) score+=8;
-  } else {
-    if(rec.obScore===-1 && obRatio<=0.77) score+=15;
-    else if(rec.obScore===-1) score+=8;
-  }
-
-  if(direction==="LONG"){
-    if(rec.change24>8) score+=10;
-    else if(rec.change24>4) score+=6;
-  } else {
-    if(rec.change24<-8) score+=10;
-    else if(rec.change24<-4) score+=6;
-  }
-
-  if(direction==="LONG"){
-    if(rec.wicks.upper<0.6) score+=5;
-    else if(rec.wicks.upper>1.0) score-=5;
-  } else {
-    if(rec.wicks.lower<0.6) score+=5;
-    else if(rec.wicks.lower>1.0) score-=5;
-  }
-
-  score = clamp(Math.round(score),0,100);
-  if(score<88) return null;
-
-  return { ...rec, direction, score };
-}
-
-// ========= TELEGRAM =========
-async function sendTelegram(text){
-  if(!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID) return;
-  try{
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text,parse_mode:"Markdown"})
-    });
-  }catch{}
-}
-
-function antiSpam(symbol,dir){
-  const key=`${symbol}-${dir}`;
-  const now=Date.now();
-  const last=lastAlerts.get(key);
-  if(last && now-last<MIN_ALERT_DELAY_MS) return false;
   lastAlerts.set(key,now);
   return true;
 }
 
-// ========= MAIN LOOP =========
-async function scanDegen(){
-  const start = Date.now();
-  const now = start;
-
-  // Mise à jour liste
-  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
-    DEGEN_SYMBOLS = await updateDegenList();
-    lastSymbolUpdate = now;
-  }
-
-  const BATCH = 5;
-  const candidates = [];
-
-  for (let i = 0; i < DEGEN_SYMBOLS.length; i += BATCH){
-    const batch = DEGEN_SYMBOLS.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(s => processDegen(s)));
-    for (const r of results){
-      const s = analyzeCandidate(r);
-      if (s) candidates.push(s);
-    }
-    await sleep(200);
-  }
-
-  const duration = Date.now() - start;
-
-  // HEARTBEAT FORMAT B
-  if (!candidates.length){
-    console.log(`[DEGEN] Scan — 0 signal | ${DEGEN_SYMBOLS.length} pairs | ${duration} ms`);
-    return;
-  }
-
-  const best = candidates.sort((a,b)=>b.score - a.score)[0];
-
-  if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
-    console.log(`[DEGEN] Cooldown — ${best.symbol}`);
-    return;
-  }
-
-  if (!antiSpam(best.symbol, best.direction)){
-    console.log(`[DEGEN] AntiSpam — ${best.symbol}`);
-    return;
-  }
-
-  console.log(`[DEGEN] SIGNAL — ${best.symbol} ${best.direction} | Score ${best.score}`);
-
-  const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
-
-  const msg =
-`🎯 *DEGEN v1.4 (API v2)*
-
-${emoji} *${best.symbol}* — ${best.direction}
-🏅 Score: ${best.score}/100
-
-📊 Vol Spike: x${num(best.volRatio,2)}
-🌡️ Vola24: ${num(best.volaPct,2)}%
-📉 ΔVWAP: ${num(best.priceVsVwap,2)}%
-
-💰 Prix: ${best.last}
-
-_Wait for limit — sniper mode._`;
-
-  await sendTelegram(msg);
-  lastGlobalTradeTime = now;
+// ========= TELEGRAM =========
+async function sendTelegram(text){
+  if(!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try{
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,{
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body:JSON.stringify({chat_id:TELEGRAM_CHAT_ID,text,parse_mode:"Markdown"})
+    });
+  }catch(e){}
 }
 
-// ========= START =========
-async function main(){
-  await sendTelegram("🟢 DEGEN v1.4 démarré.");
+// ========= SCAN =========
+async function scanOnce(){
+  console.log("⚡ DEGEN scan…");
+
+  const snapshots=[];
+  const BATCH = 4;
+
+  for(let i=0;i<SYMBOLS.length;i+=BATCH){
+    const batch = SYMBOLS.slice(i,i+BATCH);
+    const res = await Promise.all(batch.map(s=>processSymbol(s).catch(()=>null)));
+    for(const r of res) if(r) snapshots.push(r);
+    await sleep(300);
+  }
+
+  const signals=[];
+  for(const rec of snapshots){
+    const dir = isDegenSetup(rec);
+    if(dir){
+      signals.push({...rec, direction:dir});
+    }
+  }
+
+  console.log(`DEGEN: ${snapshots.length} pairs | ${signals.length} setups`);
+
+  if(!signals.length) return;
+
+  // Envoi des signaux valides
+  for(const s of signals){
+    if(!shouldSend(s.symbol, s.direction)) continue;
+
+    const emoji = s.direction==="LONG" ? "⚡🚀" : "⚡🪂";
+    const msg =
+`${emoji} ${s.direction} — ${s.symbol}
+
+Entry: ${s.last}
+dP 1m: ${s.dP_1m}%
+dP 5m: ${s.dP_5m}%
+RSI 1m: ${s.rsi1m}`;
+
+    await sendTelegram(msg);
+  }
+}
+
+// ========= MAIN =========
+export async function startDegen(){
+  console.log("🚀 DEGEN v1.4 started.");
+  await sendTelegram("🟢 Degen ON.");
   while(true){
-    try{ await scanDegen(); }
-    catch(e){ console.log("[DEGEN ERROR]", e); }
+    try{
+      await scanOnce();
+    }catch(e){
+      console.log("[DEGEN ERROR]", e);
+    }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
-
-export const startDegen = main;
