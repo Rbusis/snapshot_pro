@@ -1,4 +1,5 @@
 // degen.js — JTF DEGEN v1.4 (API v2 + Debug Control + Log B)
+
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
 
@@ -13,13 +14,16 @@ function logDebug(...args) {
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS   = 2 * 60_000;
-const MIN_ALERT_DELAY_MS = 10 * 60_000;
+const SCAN_INTERVAL_MS       = 2 * 60_000;
+const MIN_ALERT_DELAY_MS     = 10 * 60_000;
+const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
+const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-let lastAlerts = new Map();
-
-let lastSymbolUpdate = 0;
-let DEGEN_SYMBOLS = [];
+// ========= STATE =========
+let DEGEN_SYMBOLS      = [];
+let lastSymbolUpdate   = 0;
+let lastGlobalTradeTime = 0;
+const lastAlerts       = new Map();
 
 // ========= UTILS =========
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -66,6 +70,14 @@ async function getDepth(symbol){
   return d?.bids && d?.asks ? d : null;
 }
 
+async function getAllTickers(){
+  logDebug("getAllTickers");
+  const j = await safeGetJson(
+    "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
+  );
+  return j?.data ?? [];
+}
+
 // ========= INDICATORS =========
 function rsi(values,p=14){
   if(!values || values.length<p+1) return null;
@@ -104,6 +116,24 @@ function wicks(c){
     upper: ((c.h - top)/c.c)*100,
     lower: ((bot - c.l)/c.c)*100
   };
+}
+
+// ========= DYNAMIC LIST =========
+async function updateDegenList(){
+  const all = await getAllTickers();
+  if(!all?.length) return [];
+
+  const lowcaps = all
+    .filter(t =>
+      t.symbol?.endsWith("USDT") &&
+      (+t.usdtVolume > 3_000_000)
+    )
+    .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
+    .slice(0,30)
+    .map(t=>t.symbol);
+
+  logDebug("updateDegenList →", lowcaps.length, "pairs");
+  return lowcaps;
 }
 
 // ========= PROCESS ONE SYMBOL =========
@@ -158,13 +188,22 @@ async function processDegen(symbol){
   }
 
   return {
-    symbol,last,volaPct,rsi3,rsi15,priceVsVwap,
-    volRatio,obScore,bidsVol:bids,asksVol:asks,wicks:wick
+    symbol,
+    last,
+    volaPct,
+    rsi3,
+    rsi15,
+    priceVsVwap,
+    volRatio,
+    obScore,
+    bidsVol:bids,
+    asksVol:asks,
+    wicks:wick
   };
 }
 
 // ========= ANALYZE =========
-function analyze(rec){
+function analyzeCandidate(rec){
   if(!rec) return null;
 
   if(rec.volRatio < 2.2) return null;
@@ -219,14 +258,15 @@ function analyze(rec){
     symbol:rec.symbol,
     direction:dir,
     score,
-    price:rec.last,
+    last:rec.last,
+    volaPct:rec.volaPct,
+    priceVsVwap:rec.priceVsVwap,
+    volRatio:rec.volRatio,
+    obRatio: rec.asksVol>0 ? (rec.bidsVol/rec.asksVol).toFixed(2) : "N/A",
+    levier:lev,
     entry:num(entry,decimals),
     sl:num(sl,decimals),
-    tp:num(tp,decimals),
-    volRatio:num(rec.volRatio,1),
-    vola:num(rec.volaPct,1),
-    obRatio: rec.asksVol>0 ? (rec.bidsVol/rec.asksVol).toFixed(2) : "N/A",
-    levier:lev
+    tp:num(tp,decimals)
   };
 }
 
@@ -302,7 +342,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
   const msg =
-`🎯 *DEGEN v1.3 (API v2)*
+`🎯 *DEGEN v1.4 (API v2)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
