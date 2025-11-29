@@ -112,10 +112,13 @@ async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
 
+  // Même logique que Discovery : FUTURES = symbol USDT
   const list = all
-    .filter(t => +t.usdtVolume > 3_000_000)  // remove illiquid
-    .map(t => t.symbol)                      // "BTCUSDT"
-    .slice(0, 40);                           // pick 40 pairs
+    .filter(t => t.symbol?.endsWith("USDT"))
+    .filter(t => +t.usdtVolume > 3_000_000)
+    .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
+    .slice(0, 40)     // top 40 futures liquides
+    .map(t => t.symbol);
 
   console.log("[DEGEN] LIST:", list);
   return list;
