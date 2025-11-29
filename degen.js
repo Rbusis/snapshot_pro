@@ -251,56 +251,69 @@ function antiSpam(symbol,dir){
 // ========= MAIN LOOP =========
 async function scanDegen(){
   const start = Date.now();
-  const SYMBOLS = [
-    "BTCUSDT","ETHUSDT","SOLUSDT","INJUSDT","OPUSDT","ARBUSDT",
-    "SEIUSDT","TIAUSDT","APTUSDT","RNDRUSDT","FETUSDT","AGIXUSDT",
-    "NEARUSDT","ATOMUSDT","AVAXUSDT","DOTUSDT","TRXUSDT"
-  ];
+  console.log("🔍 [DEGEN] SCAN STARTED...");
 
-  const results = await Promise.all(
-    SYMBOLS.map(s => processDegen(s))
-  );
+  const now = start;
 
-  const setups = [];
-  for(const r of results){
-    const s = analyze(r);
-    if(s) setups.push(s);
+  // Mise à jour liste
+  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
+    DEGEN_SYMBOLS    = await updateDegenList();
+    lastSymbolUpdate = now;
+    console.log(`🔄 [DEGEN] LIST UPDATE — ${DEGEN_SYMBOLS.length} PAIRS`);
+  }
+
+  const BATCH = 5;
+  const candidates = [];
+
+  for (let i = 0; i < DEGEN_SYMBOLS.length; i += BATCH){
+    const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map(s => processDegen(s)));
+    for (const r of results){
+      const s = analyzeCandidate(r);
+      if (s) candidates.push(s);
+    }
+    await sleep(200);
   }
 
   const duration = Date.now() - start;
+  console.log(`[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${duration} MS | ${candidates.length} SETUP`);
 
-  // ===== HARMONISED LOG FORMAT =====
-  if(setups.length > 0){
-    console.log(`[DEGEN] ${SYMBOLS.length} pairs | ${setups.length} setup | ${duration} ms`);
+  if (!candidates.length){
+    return;
   }
 
-  if(!setups.length) return;
+  const best = candidates.sort((a,b)=>b.score-a.score)[0];
 
-  const best = setups.sort((a,b)=>b.score-a.score)[0];
+  if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
+    console.log(`[DEGEN] COOLDOWN — ${best.symbol}`);
+    return;
+  }
 
-  // LOG SIGNAL (harmonised)
-  console.log(`[DEGEN] Setup — ${best.symbol} ${best.direction} | Score ${best.score}`);
+  if (!antiSpam(best.symbol, best.direction)){
+    console.log(`[DEGEN] ANTISPAM — ${best.symbol}`);
+    return;
+  }
 
-  if(!antiSpam(best.symbol,best.direction)) return;
+  console.log(`[DEGEN] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`);
 
-  const emoji = best.direction==="LONG" ? "🚀" : "🪂";
+  const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
   const msg =
-`⚡ *DEGEN v1.4* ⚡
+`🎯 *DEGEN v1.3 (API v2)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
-🏅 Score: ${best.score}
+🏅 Score: ${best.score}/100
 
-💠 Entry: ${best.entry}
-🎯 TP: ${best.tp}
-🛑 SL: ${best.sl}
+📊 Vol Spike: x${num(best.volRatio,2)}
+🌡️ Vola24: ${num(best.volaPct,2)}%
+📉 ΔVWAP: ${num(best.priceVsVwap,2)}%
 
-📊 Vol: x${best.volRatio}
-🌡️ Vola: ${best.vola}%
-📘 OB: ${best.obRatio}
-⚖️ Levier: ${best.levier}`;
+💰 Prix: ${best.last}
+
+_Wait for limit — sniper mode._`;
 
   await sendTelegram(msg);
+  lastGlobalTradeTime = now;
 }
 
 // ========= START =========
