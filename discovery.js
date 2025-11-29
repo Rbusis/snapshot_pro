@@ -366,8 +366,8 @@ Lev: ${best.levier}`;
 
 // ========= MAIN =========
 export async function startDiscovery(){
-  console.log("🔥 Discovery v1.8 started.");
-  await sendTelegram("🟢 Discovery ON.");
+  console.log("🔥 DISCOVERY On");
+  await sendTelegram("🟢 Discovery On");
   while(true){
     try{
       await scanDiscovery();
