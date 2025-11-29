@@ -409,7 +409,6 @@ async function scanOnce(){
 
   await sendTelegram(lines.join("\n"));
 }
-}
 
 // ========= MAIN =========
 export async function startAutoselect(){
