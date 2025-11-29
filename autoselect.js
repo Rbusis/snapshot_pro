@@ -311,6 +311,22 @@ async function sendTelegram(text){
     });
   }catch{}
 }
+// ========= MARKET NOISE =========
+function isNoisyMarket(rec){
+  const vola = rec.volaPct;
+  const dVW  = rec.deltaVWAPpct;
+  const tend = rec.tend24;
+  const dOI  = rec.deltaOIpct;
+
+  if (!vola || !dVW || !tend || !dOI) return false;
+
+  return (
+    vola < 2 &&
+    Math.abs(dVW)   <= 0.5 &&
+    Math.abs(tend)  <= 15 &&
+    Math.abs(dOI)   <= 2
+  );
+}
 
 // ========= SCAN =========
 async function scanOnce(){
