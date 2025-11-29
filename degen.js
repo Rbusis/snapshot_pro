@@ -3,7 +3,7 @@
 
 import fetch from "node-fetch";
 import fs from "fs";
-import { DEBUG } from "../index.js";
+import { DEBUG } from "./index.js";
 
 // ========= DEBUG UTIL =========
 function logDebug(...args){
