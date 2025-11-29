@@ -18,6 +18,9 @@ const MIN_ALERT_DELAY_MS = 10 * 60_000;
 
 let lastAlerts = new Map();
 
+let lastSymbolUpdate = 0;
+let DEGEN_SYMBOLS = [];
+
 // ========= UTILS =========
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const num   = (v, d=4) => v==null ? null : +(+v).toFixed(d);
