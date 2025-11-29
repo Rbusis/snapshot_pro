@@ -293,72 +293,83 @@ function antiSpam(symbol,dir){
   return true;
 }
 
-// ========= MAIN SCAN =========
+// ========= MAIN LOOP =========
 async function scanDiscovery(){
-  const start=Date.now();
+  const start = Date.now();
+  console.log("🔍 [DISCOVERY] SCAN STARTED...");
 
-  // Refresh list
   const now = start;
-  if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
+  const btcTrend = 0;
+
+  // Refresh liste
+  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
     const all = await getAllTickers();
     let list = all.filter(t =>
       t.symbol?.endsWith("USDT") &&
       !IGNORE_LIST.includes(t.symbol) &&
-      (+t.usdtVolume>5_000_000)
+      (+t.usdtVolume > 5_000_000)
     );
     list.sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume));
     DISCOVERY_SYMBOLS = list.slice(0,50).map(t=>t.symbol);
 
-    try{ fs.writeFileSync("./config/discovery_list.json", JSON.stringify(DISCOVERY_SYMBOLS,null,2)); }catch{}
+    try {
+      fs.writeFileSync("./config/discovery_list.json", JSON.stringify(DISCOVERY_SYMBOLS,null,2));
+    } catch {}
 
     lastSymbolUpdate = now;
-    console.log(`🔄 Discovery list (${DISCOVERY_SYMBOLS.length}) updated.`);
+    console.log(`🔄 [DISCOVERY] LIST UPDATE — ${DISCOVERY_SYMBOLS.length} PAIRS`);
   }
 
-  const results=[];
-  const BATCH=5;
+  const BATCH = 5;
+  const signals = [];
 
-  for(let i=0;i<DISCOVERY_SYMBOLS.length;i+=BATCH){
-    const batch=DISCOVERY_SYMBOLS.slice(i,i+BATCH);
-    const res = await Promise.all(batch.map(s=>processDiscovery(s)));
-    for(const r of res){
-      const s=analyze(r);
-      if(s) results.push(s);
+  for (let i = 0; i < DISCOVERY_SYMBOLS.length; i += BATCH){
+    const batch = DISCOVERY_SYMBOLS.slice(i, i + BATCH);
+    const res   = await Promise.all(batch.map(s => processDiscovery(s)));
+    for (const r of res){
+      const s = analyze(r, btcTrend);
+      if (s) signals.push(s);
     }
     await sleep(200);
   }
 
-  const duration=Date.now()-start;
+  const duration = Date.now() - start;
+  console.log(`[DISCOVERY] SCAN — ${DISCOVERY_SYMBOLS.length} PAIRS | ${duration} MS | ${signals.length} SETUP`);
 
-  // Logged output PRO format
-  console.log(`[DISCOVERY] Scan — ${DISCOVERY_SYMBOLS.length} pairs | ${duration} ms | ${results.length} setups`);
-
-  if(!results.length) return;
-
-  const best = results.sort((a,b)=>b.score-a.score)[0];
-
-  if(now-lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
-    console.log(`[DISCOVERY] Cooldown — ${best.symbol}`);
+  if (!signals.length){
     return;
   }
 
-  if(!antiSpam(best.symbol,best.direction)){
-    console.log(`[DISCOVERY] AntiSpam — ${best.symbol}`);
+  const best = signals.sort((a,b)=>b.score-a.score)[0];
+
+  if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
+    console.log(`[DISCOVERY] COOLDOWN — ${best.symbol}`);
     return;
   }
+
+  if (!antiSpam(best.symbol,best.direction)){
+    console.log(`[DISCOVERY] ANTISPAM — ${best.symbol}`);
+    return;
+  }
+
+  console.log(`[DISCOVERY] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`);
 
   const emoji = best.direction==="LONG" ? "🚀" : "🪂";
+
   const msg =
-`${emoji} ${best.direction} — ${best.symbol}
+`⚡ *JTF DISCOVERY v1.7* ⚡
 
-Entry: ${best.limitEntry}
-TP: ${best.tp}
-SL: ${best.sl}
+${emoji} *${best.symbol}* — ${best.direction}
+🏅 Score: ${best.score}
 
-Vol: x${best.volRatio}
-Vola: ${best.vola}%
-OB: ${best.obRatio}
-Lev: ${best.levier}`;
+💠 Entry: ${best.limitEntry}
+🎯 TP: ${best.tp}
+🛑 SL: ${best.sl}
+
+📊 Vol: x${best.volRatio}
+🌡️ Vola: ${best.vola}%
+📘 OB: ${best.obRatio}
+⚖️ Levier: ${best.levier}`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
