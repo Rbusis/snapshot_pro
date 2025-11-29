@@ -1,8 +1,9 @@
-// degen.js — JTF DEGEN v3.0 (Stable + Sync Discovery)
+// degen.js — JTF DEGEN v3.0 (Strict Mode + Data Check)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
 
+// ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
@@ -11,23 +12,24 @@ const MIN_ALERT_DELAY_MS     = 10 * 60_000;
 const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
+// ========= STATE =========
 let DEGEN_SYMBOLS       = [];
 let lastSymbolUpdate    = 0;
 let lastGlobalTradeTime = 0;
 const lastAlerts        = new Map();
 
+// ========= UTILS =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 
-// ========= SAFE FETCH =========
 async function safeGetJson(url){
   try{
     const r = await fetch(url,{headers:{Accept:"application/json"}});
     if(!r.ok) return null;
     return await r.json();
   }catch(e){
-    console.log("[DEGEN ERROR FETCH]", e.message);
+    console.log("[DEGEN FETCH ERROR]", e.message);
     return null;
   }
 }
@@ -122,15 +124,16 @@ async function updateDegenList(){
     .filter(t => t.symbol?.endsWith("USDT"))
     .filter(t => +t.usdtVolume > 3_000_000)
     .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
-    .slice(0, 40)
+    .slice(0,40)
     .map(t => t.symbol);
 
-  console.log("[DEGEN LIST]", list.length, "pairs");
+  console.log("[DEGEN] LIST UPDATE →", list.length, "pairs");
   return list;
 }
 
-// ========= PROCESS =========
+// ========= PROCESS ONE PAIR =========
 async function processDegen(symbol){
+
   const tk = await getTicker(symbol);
   if(!tk) return null;
 
@@ -144,11 +147,11 @@ async function processDegen(symbol){
     ? ((high24-low24)/last)*100
     : null;
 
+  // Candles
   const [c3m,c15m] = await Promise.all([
     getCandles(symbol,180,100),
     getCandles(symbol,900,100)
   ]);
-
   if(!c3m?.length || c3m.length < 20) return null;
 
   const rsi3  = rsi(c3m.map(x=>x.c));
@@ -162,18 +165,26 @@ async function processDegen(symbol){
   const avgVol  = c3m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol>0 ? lastVol/avgVol : 1;
 
-  const depth  = await getDepth(symbol);
+  // Depth
+  const depth = await getDepth(symbol);
   let obScore=0,bids=0,asks=0;
 
   if(depth){
     bids = depth.bids.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     asks = depth.asks.slice(0,10).reduce((a,x)=>a+(+x[1]),0);
     if(asks>0){
-      const r=bids/asks;
+      const r = bids/asks;
       if(r>1.25) obScore=1;
       else if(r<0.75) obScore=-1;
     }
   }
+
+  // ========= DATA CHECK (visible dans Railway) =========
+  console.log(
+    `[CHECK] ${symbol} | P=${last} | Vola=${volaPct?.toFixed(2)}% | ` +
+    `volRatio=${volRatio?.toFixed(2)} | ΔVWAP=${priceVsVwap?.toFixed(2)} | ` +
+    `RSI3=${rsi3?.toFixed(1)} | OB=${obScore}`
+  );
 
   return {
     symbol,last,volaPct,rsi3,priceVsVwap,
@@ -274,14 +285,15 @@ function antiSpam(symbol,dir){
   return true;
 }
 
-// ========= MAIN =========
+// ========= MAIN LOOP =========
 async function scanDegen(){
   const start = Date.now();
   console.log("🔍 [DEGEN] SCAN STARTED...");
 
   const now = start;
 
-  if(now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
+  // Refresh liste
+  if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS = await updateDegenList();
     lastSymbolUpdate = now;
     console.log(`🔄 [DEGEN] LIST REFRESH — ${DEGEN_SYMBOLS.length} pairs`);
@@ -322,7 +334,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v3.0 (Stable)*
+`🎯 *JTF DEGEN v3.0 (Strict)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}
@@ -340,14 +352,15 @@ ${emoji} *${best.symbol}* — ${best.direction}
   lastGlobalTradeTime = now;
 }
 
+// ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN v3.0 On");
-  await sendTelegram("🟢 DEGEN v3.0 On");
+  console.log("🔥 DEGEN v3.0 On (Strict Mode)");
+  await sendTelegram("🟢 DEGEN v3.0 (Strict) On");
   while(true){
     try{
       await scanDegen();
     }catch(e){
-      console.log("[DEGEN ERROR]", e);
+      console.log("[DEGEN ERROR]",e);
     }
     await sleep(SCAN_INTERVAL_MS);
   }
