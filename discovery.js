@@ -47,20 +47,16 @@ const num = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 async function safeGetJson(url){
   try{
     const r = await fetch(url,{ headers:{Accept:"application/json"} });
-    if(!r.ok){
-      console.log(`[HTTP ERROR] ${r.status} ${url}`);
-      return null;
-    }
+    if(!r.ok) return null;
     return await r.json();
-  }catch(e){
-    console.log("[NETWORK ERROR]",e.message);
+  }catch{
     return null;
   }
 }
 
-// ========= API v2 FIX =========
+// ========= API v2 FIX (symbol exact) =========
 
-// Candles (OK)
+// Candles
 async function getCandles(symbol, seconds, limit=200){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
@@ -71,7 +67,7 @@ async function getCandles(symbol, seconds, limit=200){
   })).sort((a,b)=>a.t-b.t);
 }
 
-// Ticker (FIX)
+// ======= Ticker (100% FIXED) =======
 async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
@@ -88,7 +84,7 @@ async function getFunding(symbol){
   )?.data ?? null;
 }
 
-// Depth (OK)
+// Depth FIX
 async function getDepth(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/depth?symbol=${symbol}&limit=20&productType=usdt-futures`
@@ -96,7 +92,7 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// Liste futures (OK)
+// Liste complète des futures
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -116,7 +112,7 @@ async function getBTCTrend(){
 async function updateDiscoveryList(){
   const all = await getAllTickers();
   if(!all.length){
-    console.log("⚠ DiscoveryList fallback mode");
+    console.log("⚠ DiscoveryList fallback mode (no market data)");
     return FALLBACK_MIDCAPS;
   }
 
@@ -144,6 +140,7 @@ function rsi(values,p=14){
   }
   g/=p; l=(l/p)||1e-9;
   let val = 100-100/(1+(g/l));
+
   for(let i=p+1;i<values.length;i++){
     const d=values[i]-values[i-1];
     g=(g*(p-1)+Math.max(d,0))/p;
@@ -176,6 +173,7 @@ function wicks(c){
 // ========= PROCESS SYMBOL =========
 async function processDiscovery(symbol){
   const tk = await getTicker(symbol);
+
   if(!tk){
     console.log(`[DISCOVERY DEBUG] ${symbol}: Ticker NULL`);
     return null;
@@ -183,7 +181,7 @@ async function processDiscovery(symbol){
 
   const last = +tk.lastPr || +tk.markPrice || +tk.last || null;
   if(!last){
-    console.log(`[DISCOVERY DEBUG] ${symbol}: last=NULL`);
+    console.log(`[DISCOVERY DEBUG] ${symbol}: last=NULL (ticker incomplete)`);
     return null;
   }
 
@@ -206,7 +204,6 @@ async function processDiscovery(symbol){
   const priceVsVwap = vwap5 ? ((last-vwap5)/vwap5)*100 : 0;
 
   const wick = wicks(c5m[c5m.length-1]);
-
   const lastVol = c5m[c5m.length-1].v;
   const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol>0 ? lastVol/avgVol : 1;
@@ -226,7 +223,7 @@ async function processDiscovery(symbol){
     }
   }
 
-  console.log(`[DISCOVERY DEBUG] ${symbol}: price=${last} | volRatio=${num(volRatio)} | VWAP-gap=${num(priceVsVwap)} | vola=${num(volaPct)}`);
+  console.log(`[DISCOVERY DEBUG] ${symbol}: last=${last} | vola=${num(volaPct)} | rsi5=${num(rsi5)} | vwapGap=${num(priceVsVwap)} | volRatio=${num(volRatio)}`);
 
   return {
     symbol,last,volaPct,rsi5,rsi15,
