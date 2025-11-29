@@ -7,6 +7,15 @@ import { startDiscovery } from "./discovery.js";
 import { startDegen } from "./degen.js";
 import { startSwing } from "./swing.js";
 
+// ===== DEBUG CONTROL (GLOBAL + PER BOT) =====
+export const DEBUG = {
+  global: false,      // Active le debug pour tous les bots
+  autoselect: false,  // Debug du bot AUTOSELECT
+  discovery: false,   // Debug du bot DISCOVERY
+  swing: false,       // Debug du bot SWING
+  degen: false        // Debug du bot DEGEN
+};
+
 // ========= KEEPALIVE RAILWAY =========
 const PORT = process.env.PORT || 8080;
 
