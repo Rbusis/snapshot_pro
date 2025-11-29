@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v1.4 (API v2 + Debug Control + Log B)
+// degen.js — JTF DEGEN v1.5 (API v2 FULL FIX + _UMCBL Auto + Stable)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -41,6 +41,8 @@ async function safeGetJson(url){
 }
 
 // ========= API v2 =========
+// IMPORTANT : Tous les symboles doivent être au format : XXXXXUSDT_UMCBL
+
 async function getTicker(symbol){
   logDebug("getTicker", symbol);
   const j = await safeGetJson(
@@ -55,9 +57,11 @@ async function getCandles(symbol, seconds, limit=80){
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
   );
   if (!j?.data?.length) return [];
-  return j.data.map(c => ({
-    t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
-  })).sort((a,b)=>a.t-b.t);
+  return j.data
+    .map(c => ({
+      t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
+    }))
+    .sort((a,b)=>a.t-b.t);
 }
 
 async function getDepth(symbol){
@@ -67,7 +71,7 @@ async function getDepth(symbol){
   );
   if(!j?.data) return null;
   const d = Array.isArray(j.data) ? j.data[0] : j.data;
-  return d?.bids && d?.asks ? d : null;
+  return (d?.bids && d?.asks) ? d : null;
 }
 
 async function getAllTickers(){
@@ -82,6 +86,7 @@ async function getAllTickers(){
 function rsi(values,p=14){
   if(!values || values.length<p+1) return null;
   let g=0,l=0;
+
   for(let i=1;i<=p;i++){
     const d = values[i]-values[i-1];
     d>=0?g+=d:l-=d;
@@ -118,7 +123,7 @@ function wicks(c){
   };
 }
 
-// ========= DYNAMIC LIST =========
+// ========= DYNAMIC LIST (FULL FIX _UMCBL) =========
 async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
@@ -130,10 +135,10 @@ async function updateDegenList(){
     )
     .sort((a,b)=>(+b.usdtVolume)-(+a.usdtVolume))
     .slice(0,30)
-    .map(t=>t.symbol);
+    .map(t => `${t.symbol}_UMCBL`);    // FIX ICI
 
-  logDebug("updateDegenList →", lowcaps.length, "pairs");
-  return lowcaps;
+  // éviter doublons
+  return [...new Set(lowcaps)];
 }
 
 // ========= PROCESS ONE SYMBOL =========
@@ -309,23 +314,20 @@ async function scanDegen(){
   const candidates = [];
 
   for (let i = 0; i < DEGEN_SYMBOLS.length; i += BATCH){
-  const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
-  const results = await Promise.all(batch.map(async (s) => {
-    const rec = await processDegen(s);
+    const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map(async (s) => {
+      const rec = await processDegen(s);
+      console.log("[DEGEN REC]", s, rec); // debug utile
+      return rec;
+    }));
 
-    // 🔍 LOG TEMPORAIRE POUR DEBUG (UNE SEULE LIGNE PAR PAIRE)
-    console.log("[DEGEN REC]", s, rec);
+    for (const r of results){
+      const s = analyzeCandidate(r);
+      if (s) candidates.push(s);
+    }
 
-    return rec;
-  }));
-
-  for (const r of results){
-    const s = analyzeCandidate(r);
-    if (s) candidates.push(s);
+    await sleep(200);
   }
-
-  await sleep(200);
-}
 
   const duration = Date.now() - start;
   console.log(`[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${duration} MS | ${candidates.length} SETUP`);
@@ -351,7 +353,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🔫🟢" : "🔫🔴";
 
   const msg =
-`🎯 *DEGEN v1.4 (API v2)*
+`🎯 *DEGEN v1.5 (API v2 FIX)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
