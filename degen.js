@@ -309,14 +309,23 @@ async function scanDegen(){
   const candidates = [];
 
   for (let i = 0; i < DEGEN_SYMBOLS.length; i += BATCH){
-    const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(s => processDegen(s)));
-    for (const r of results){
-      const s = analyzeCandidate(r);
-      if (s) candidates.push(s);
-    }
-    await sleep(200);
+  const batch   = DEGEN_SYMBOLS.slice(i, i + BATCH);
+  const results = await Promise.all(batch.map(async (s) => {
+    const rec = await processDegen(s);
+
+    // 🔍 LOG TEMPORAIRE POUR DEBUG (UNE SEULE LIGNE PAR PAIRE)
+    console.log("[DEGEN REC]", s, rec);
+
+    return rec;
+  }));
+
+  for (const r of results){
+    const s = analyzeCandidate(r);
+    if (s) candidates.push(s);
   }
+
+  await sleep(200);
+}
 
   const duration = Date.now() - start;
   console.log(`[DEGEN] SCAN — ${DEGEN_SYMBOLS.length} PAIRS | ${duration} MS | ${candidates.length} SETUP`);
