@@ -288,71 +288,90 @@ function shouldSend(symbol,dir){
   return true;
 }
 
-// ========= MAIN SCAN =========
+// ===== SCAN =====
 async function scanOnce(){
-  const t0 = Date.now();
-  console.log("🔍 [SWING] Scan...");
+  const start = Date.now();
+  console.log("🔍 [SWING] SCAN STARTED...");
 
   const snaps=[];
-  const BATCH=4;
-
-  for(let i=0;i<SYMBOLS.length;i+=BATCH){
-    const batch=SYMBOLS.slice(i,i+BATCH);
-    const res=await Promise.all(batch.map(s=>processSymbol(s)));
-    res.forEach(r=>{ if(r) snaps.push(r); });
-    await sleep(400);
+  for(let i=0;i<SYMBOLS.length;i+=5){
+    const batch=SYMBOLS.slice(i,i+5);
+    const res=await Promise.all(batch.map(s=>processSymbol(s).catch(()=>null)));
+    for(const r of res) if(r)snaps.push(r);
+    if(i+5<SYMBOLS.length)await sleep(800);
   }
 
-  const setups=[];
-
+  const ready=[],prime=[];
   for(const rec of snaps){
-    const jds = calculateJDSSwing(rec);
-    if(jds < JDS_READY) continue;
+    const j=calculateJDSSwing(rec);
+    if(j<60)continue;
 
-    if(shouldAvoid(rec)) continue;
+    const avoid=shouldAvoidMarket(rec);
+    if(avoid)continue;
 
-    const dir = detectDirection(rec,jds);
-    if(dir==="NEUTRAL") continue;
+    if(j<82 && rec.volaPct<6)continue;
 
-    if(!isTimingGood(rec,dir)) continue;
+    const dir=detectDirection(rec,j);
 
-    const plan = buildPlan(rec,dir);
-    const lev = rec.volaPct>10?"3x":"4x";
+    if(dir==="LONG"&&rec.deltaOIpct<-2)continue;
+    if(dir==="SHORT"&&rec.deltaOIpct>2)continue;
 
-    setups.push({
+    if(!isTimingGood(rec,dir))continue;
+
+    const plan=calculateTradePlan(rec,dir,j);
+    const lev = getRecommendedLeverage(rec.volaPct);
+    const dur = estimateDuration(j,rec);
+
+    const setup={
       symbol:rec.symbol,
       direction:dir,
-      jds:num(jds,1),
-      plan,
-      lev
-    });
+      jds:num(j,1),
+      entry:plan.entry,
+      sl:plan.sl,
+      tp1:plan.tp1,
+      tp2:plan.tp2,
+      rr:plan.rr,
+      leverage:lev,
+      duration:dur,
+      moveToBe:getMoveToBeCondition(),
+      momentum:`RSI 15m:${rec.rsi["15m"]} | 1h:${rec.rsi["1h"]} | 4h:${rec.rsi["4h"]}`,
+      vwapContext:`VWAP 1h:${rec.deltaVWAP1h}% | 4h:${rec.deltaVWAP4h}%`
+    };
+
+    if(j>=JDS_THRESHOLD_PRIME)prime.push(setup);
+    else if(j>=JDS_THRESHOLD_READY)ready.push(setup);
   }
 
-  const ms = Date.now() - t0;
-  console.log(`[SWING] Scan — ${SYMBOLS.length} pairs | ${ms} ms | ${setups.length} setups`);
+  const totalSetup = prime.length + ready.length;
+  const duration   = Date.now() - start;
+  console.log(`[SWING] SCAN — ${SYMBOLS.length} PAIRS | ${duration} MS | ${totalSetup} SETUP`);
 
-  if(!setups.length) return;
-
-  const best = setups.sort((a,b)=>b.jds-a.jds)[0];
-
-  if(!shouldSend(best.symbol,best.direction)){
-    console.log(`[SWING] AntiSpam — ${best.symbol}`);
+  if(!prime.length && !ready.length){
+    // aucun envoi Telegram (on garde le log uniquement)
     return;
   }
 
-  const emoji = best.direction==="LONG"?"📈":"📉";
+  const sends = prime.length?prime:ready.slice(0,3);
+  const state = prime.length?"PRIME":"READY";
 
-  const msg =
-`${emoji} SWING — ${best.symbol}
+  let msg=`🎯 *JTF SWING — ${state}*\n\n`;
+  for(let i=0;i<sends.length;i++){
+    const s=sends[i];
+    if(!shouldSendAlert(s.symbol,s.direction,state))continue;
+    const emoji=s.direction==="LONG"?"📈":"📉";
 
-Dir: ${best.direction}
-Entry: ${best.plan.entry}
-TP: ${best.plan.tp}
-SL: ${best.plan.sl}
-
-R:R: ${best.plan.rr}
-Lev: ${best.lev}
-JDS: ${best.jds}`;
+    msg+=`*${i+1}) ${s.symbol}*\n`;
+    msg+=`${emoji} *${s.direction}*\n`;
+    msg+=`💠 Entry: ${s.entry}\n`;
+    msg+=`🛡️ SL: ${s.sl}\n`;
+    msg+=`🎯 TP1:${s.tp1} | TP2:${s.tp2}\n`;
+    msg+=`📏 Levier: ${s.leverage} — R:R=${s.rr}\n`;
+    msg+=`⏱️ Durée: ${s.duration}\n`;
+    msg+=`🔄 Move to BE: ${s.moveToBe}\n`;
+    msg+=`🔥 JDS-SWING: ${s.jds}\n`;
+    msg+=`📊 Momentum: ${s.momentum}\n`;
+    msg+=`📍 VWAP: ${s.vwapContext}\n\n`;
+  }
 
   await sendTelegram(msg);
 }
