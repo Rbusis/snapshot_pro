@@ -1,86 +1,80 @@
-// degen.js — JTF DEGEN v2.6 (FIX API v2 SYMBOL FORMAT)
+// degen.js — VERSION DEBUG ULTRA-VERBOSE
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
 
-// ========= DEBUG =========
-function logDebug(...args){
-  if (DEBUG.global || DEBUG.degen){
-    console.log("[DEGEN DEBUG]", ...args);
-  }
-}
-
-// ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS       = 2 * 60_000;   // 2 minutes
-const MIN_ALERT_DELAY_MS     = 10 * 60_000;  // 10 minutes entre 2 signaux même pair+dir
-const GLOBAL_COOLDOWN_MS     = 30 * 60_000;  // 30 minutes entre 2 signaux globaux
-const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;  // 1h refresh liste
+const SCAN_INTERVAL_MS       = 2 * 60_000;
+const MIN_ALERT_DELAY_MS     = 10 * 60_000;
+const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
+const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// ========= STATE =========
 let DEGEN_SYMBOLS       = [];
 let lastSymbolUpdate    = 0;
 let lastGlobalTradeTime = 0;
 const lastAlerts        = new Map();
 
-// ========= UTILS =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 
-// ✅ FIX: Conversion symbole pour API v2
+// ✅ CONVERSION SYMBOLE
 function toApiSymbol(symbol){
-  // Enlever USDT à la fin
-  return symbol.replace(/USDT$/, '');
+  const clean = symbol.replace(/USDT$/, '');
+  console.log(`[DEGEN toApiSymbol] ${symbol} → ${clean}`);
+  return clean;
 }
 
 async function safeGetJson(url){
   try{
+    console.log(`[DEGEN FETCH] ${url}`);
     const r = await fetch(url,{headers:{Accept:"application/json"}});
+    
     if(!r.ok){
-      logDebug("HTTP ERROR", r.status, url);
+      console.log(`[DEGEN FETCH ERROR] HTTP ${r.status}`);
       return null;
     }
-    return await r.json();
+    
+    const json = await r.json();
+    console.log(`[DEGEN FETCH OK] data:`, json?.data ? 'YES' : 'NO');
+    return json;
+    
   }catch(e){
-    console.log("[DEGEN safeGetJson ERROR]", url, e.message);
+    console.log("[DEGEN FETCH EXCEPTION]", e.message);
     return null;
   }
 }
 
-// ========= API v2 (FIXED) =========
 async function getTicker(symbol){
   const apiSymbol = toApiSymbol(symbol);
-  logDebug("getTicker", symbol, "→", apiSymbol);
+  const url = `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${apiSymbol}&productType=usdt-futures`;
   
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${apiSymbol}&productType=usdt-futures`
-  );
+  const j = await safeGetJson(url);
   
   if(!j?.data){
-    logDebug("getTicker FAIL", symbol, "no data");
+    console.log(`[DEGEN getTicker FAIL] ${symbol} - no data`);
     return null;
   }
   
   const data = Array.isArray(j.data) ? j.data[0] : j.data;
-  logDebug("getTicker OK", symbol, data?.lastPr);
+  console.log(`[DEGEN getTicker OK] ${symbol} - lastPr: ${data?.lastPr}`);
   return data;
 }
 
 async function getCandles(symbol, seconds, limit=120){
   const apiSymbol = toApiSymbol(symbol);
-  logDebug("getCandles", symbol, "→", apiSymbol, seconds);
+  const url = `https://api.bitget.com/api/v2/mix/market/candles?symbol=${apiSymbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`;
   
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${apiSymbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
-  );
+  const j = await safeGetJson(url);
   
   if(!j?.data?.length){
-    logDebug("getCandles FAIL", symbol);
+    console.log(`[DEGEN getCandles FAIL] ${symbol}`);
     return [];
   }
+  
+  console.log(`[DEGEN getCandles OK] ${symbol} - ${j.data.length} candles`);
   
   return j.data.map(c=>({
     t:+c[0], o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
@@ -89,11 +83,9 @@ async function getCandles(symbol, seconds, limit=120){
 
 async function getDepth(symbol){
   const apiSymbol = toApiSymbol(symbol);
-  logDebug("getDepth", symbol, "→", apiSymbol);
+  const url = `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${apiSymbol}&productType=usdt-futures&limit=20`;
   
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${apiSymbol}&productType=usdt-futures&limit=20`
-  );
+  const j = await safeGetJson(url);
   
   if(!j?.data) return null;
   const d = Array.isArray(j.data)?j.data[0]:j.data;
@@ -101,14 +93,14 @@ async function getDepth(symbol){
 }
 
 async function getAllTickers(){
-  logDebug("getAllTickers()");
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
   );
   return j?.data ?? [];
 }
 
-// ========= INDICATORS =========
+// ... (garder toutes les autres fonctions identiques : rsi, vwap, wicks, etc.)
+
 function rsi(values,p=14){
   if(!values || values.length < p+1) return null;
   let g=0,l=0;
@@ -148,7 +140,6 @@ function wicks(c){
   };
 }
 
-// ========= LISTE SYMBOLS (STABLE) =========
 async function updateDegenList(){
   const all = await getAllTickers();
   if(!all?.length) return [];
@@ -164,17 +155,15 @@ async function updateDegenList(){
   return list;
 }
 
-// ========= PROCESS =========
 async function processDegen(symbol){
-  logDebug("processDegen START", symbol);
+  console.log(`[DEGEN processDegen START] ${symbol}`);
 
   const tk = await getTicker(symbol);
   if(!tk){
-    logDebug("processDegen FAIL - no ticker", symbol);
+    console.log(`[DEGEN processDegen] ${symbol} - NO TICKER`);
     return null;
   }
 
-  // ✅ FIX: Extraction robuste du prix
   const last = tk.lastPr 
     ? +tk.lastPr 
     : tk.markPrice 
@@ -186,9 +175,11 @@ async function processDegen(symbol){
     : null;
 
   if(!last || last <= 0){
-    logDebug("processDegen FAIL - invalid price", symbol, tk);
+    console.log(`[DEGEN processDegen] ${symbol} - INVALID PRICE: ${last}`);
     return null;
   }
+
+  console.log(`[DEGEN processDegen] ${symbol} - PRICE OK: ${last}`);
 
   const high24 = tk.high24h != null ? +tk.high24h : null;
   const low24  = tk.low24h  != null ? +tk.low24h  : null;
@@ -203,7 +194,7 @@ async function processDegen(symbol){
   ]);
 
   if(!c3m?.length || c3m.length < 20){
-    logDebug("processDegen FAIL - insufficient candles", symbol, c3m?.length);
+    console.log(`[DEGEN processDegen] ${symbol} - INSUFFICIENT CANDLES`);
     return null;
   }
 
@@ -233,7 +224,7 @@ async function processDegen(symbol){
     }
   }
 
-  logDebug("processDegen SUCCESS", symbol, {last, volaPct, rsi3, priceVsVwap, volRatio});
+  console.log(`[DEGEN processDegen OK] ${symbol} - volRatio: ${volRatio.toFixed(2)}`);
 
   return {
     symbol,
@@ -250,11 +241,9 @@ async function processDegen(symbol){
   };
 }
 
-// ========= ANALYSE (version "stable") =========
 function analyzeCandidate(rec){
   if(!rec) return null;
 
-  // Filtres relativement prudents
   if(rec.volRatio < 2.0) return null;
   if(rec.volaPct  == null || rec.volaPct < 3 || rec.volaPct > 20) return null;
 
@@ -282,7 +271,6 @@ function analyzeCandidate(rec){
   );
   if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
 
-  // Score mini plus bas pour version "stable"
   if(score<78) return null;
 
   const decimals = rec.last<1?5:3;
@@ -320,7 +308,6 @@ function analyzeCandidate(rec){
   };
 }
 
-// ========= TELEGRAM =========
 async function sendTelegram(msg){
   if(!TELEGRAM_BOT_TOKEN||!TELEGRAM_CHAT_ID) return;
   try{
@@ -345,14 +332,12 @@ function antiSpam(symbol,dir){
   return true;
 }
 
-// ========= MAIN LOOP =========
 async function scanDegen(){
   const start = Date.now();
   console.log("🔍 [DEGEN] SCAN STARTED...");
 
   const now = start;
 
-  // Refresh liste
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS    = await updateDegenList();
     lastSymbolUpdate = now;
@@ -400,7 +385,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v2.6 (API v2 FIXED)*
+`🎯 *JTF DEGEN v2.6 (API v2 DEBUG)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
@@ -417,10 +402,9 @@ _Wait for limit — sniper mode._`;
   lastGlobalTradeTime = now;
 }
 
-// ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN On");
-  await sendTelegram("🟢 DEGEN v2.6 (FIX API) On");
+  console.log("🔥 DEGEN On (DEBUG MODE)");
+  await sendTelegram("🟢 DEGEN v2.6 (DEBUG) On");
   while(true){
     try{
       await scanDegen();
