@@ -70,7 +70,7 @@ async function getCandles(symbol, seconds, limit=200){
 // Ticker FIX
 async function getTicker(symbol){
   const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
+    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`symbol=${symbol}&productType=usdt-futures`
   );
   return j?.data ?? null;
 }
