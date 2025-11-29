@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v3.1 (API v2 FIX + Logique DEGEN + DROP/DATA Logs)
+// degen.js — JTF DEGEN v3.2 (API v2, 5m candles + DROP/DATA Logs)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -173,27 +173,28 @@ async function processDegen(symbol){
     ? ((high24-low24)/last)*100
     : null;
 
-  const [c3m,c15m] = await Promise.all([
-    getCandles(symbol,180,120),
+  // ⏱️ 5m & 15m au lieu de 3m & 15m
+  const [c5m,c15m] = await Promise.all([
+    getCandles(symbol,300,120),
     getCandles(symbol,900,120)
   ]);
 
-  if(!c3m?.length || c3m.length < 20){
-    console.log(`[DEGEN DROP] ${symbol} — insufficient 3m candles (${c3m?.length || 0})`);
+  if(!c5m?.length || c5m.length < 20){
+    console.log(`[DEGEN DROP] ${symbol} — insufficient 5m candles (${c5m?.length || 0})`);
     return null;
   }
 
-  const rsi3  = rsi(c3m.map(x=>x.c));
+  const rsi5  = rsi(c5m.map(x=>x.c));
   const rsi15 = rsi(c15m.map(x=>x.c));
 
-  const vwp = vwap(c3m.slice(-24));
+  const vwp = vwap(c5m.slice(-24));
   const priceVsVwap = vwp ? ((last-vwp)/vwp)*100 : 0;
 
-  const lastC = c3m[c3m.length-1];
+  const lastC = c5m[c5m.length-1];
   const wick  = wicks(lastC);
 
   const lastVol = lastC.v;
-  const avgVol  = c3m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
+  const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol>0 ? lastVol/avgVol : 1;
 
   const depth = await getDepth(symbol);
@@ -213,14 +214,14 @@ async function processDegen(symbol){
   console.log(
     `[DEGEN DATA] ${symbol} | P=${last} | Vola=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
     `volRatio=${volRatio.toFixed(2)} | ΔVWAP=${priceVsVwap.toFixed(2)} | ` +
-    `RSI3=${rsi3!=null?rsi3.toFixed(1):"n/a"} | OB=${obScore}`
+    `RSI5=${rsi5!=null?rsi5.toFixed(1):"n/a"} | OB=${obScore}`
   );
 
   return {
     symbol,
     last,
     volaPct,
-    rsi3,
+    rsi5,
     rsi15,
     priceVsVwap,
     volRatio,
@@ -257,8 +258,8 @@ function analyzeCandidate(rec){
   score += rec.volRatio>=3 ? 30 : 15;
   score += (gap>=1 && gap<=2.2) ? 20 : 10;
   score += (dir==="LONG"
-    ? (rec.rsi3>=55&&rec.rsi3<=75?15:5)
-    : (rec.rsi3>=25&&rec.rsi3<=45?15:5)
+    ? (rec.rsi5>=55&&rec.rsi5<=75?15:5)
+    : (rec.rsi5>=25&&rec.rsi5<=45?15:5)
   );
   if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
 
@@ -376,7 +377,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v3.1 (API v2)*
+`🎯 *JTF DEGEN v3.2 (API v2, 5m)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
@@ -400,8 +401,8 @@ _Wait for limit — sniper mode._`;
 
 // ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN v3.1 On");
-  await sendTelegram("🟢 DEGEN v3.1 On");
+  console.log("🔥 DEGEN v3.2 On (5m)");
+  await sendTelegram("🟢 DEGEN v3.2 (5m) On");
   while(true){
     try{ await scanDegen(); }
     catch(e){ console.log("[DEGEN ERROR]", e); }
