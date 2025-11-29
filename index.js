@@ -1,11 +1,7 @@
 // ===== DEBUG CONTROL (GLOBAL + PER BOT) =====
+// Nous importons simplement le fichier debug.js ici.
+// Plus rien ne doit se trouver après l'import.
 import { DEBUG } from "./debug.js";
-  global: false,      // Active le debug pour tous les bots
-  autoselect: false,  // Debug du bot AUTOSELECT
-  discovery: false,   // Debug du bot DISCOVERY
-  swing: false,       // Debug du bot SWING
-  degen: false        // Debug du bot DEGEN
-};
 
 // index.js — CHEF D'ORCHESTRE ULTIME (MQI OFF)
 // Serveur Web + 4 Bots : Autoselect, Discovery, Degen, Swing
@@ -16,9 +12,8 @@ import { startDiscovery } from "./discovery.js";
 import { startDegen } from "./degen.js";
 import { startSwing } from "./swing.js";
 
-
 // ========= KEEPALIVE RAILWAY =========
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8088;
 
 http.createServer((req, res) => {
   res.writeHead(200);
