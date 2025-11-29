@@ -305,8 +305,8 @@ ${emoji} *${best.symbol}* — ${best.direction}
 
 // ========= START =========
 async function main(){
-  console.log("🔥 DEGEN v1.4 started.");
-  await sendTelegram("🟢 DEGEN v1.4 lancé.");
+  console.log("🔥 DEGEN On");
+  await sendTelegram("🟢 DEGEN On");
   while(true){
     try{ await scanDegen(); }
     catch(e){ console.log("[DEGEN ERROR]",e); }
