@@ -1,4 +1,4 @@
-// discovery.js — JTF DISCOVERY v1.6.2 (BTC DISABLED — API v2 FULL FIX)
+// discovery.js — JTF DISCOVERY v1.6.3 (FULL API v2, BTC OFF)
 // Stable — Debug complet — Compatible Railway
 
 import fetch from "node-fetch";
@@ -8,35 +8,35 @@ import fs from "fs";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS      = 5 * 60_000;
-const MIN_ALERT_DELAY_MS    = 15 * 60_000;
-const GLOBAL_COOLDOWN_MS    = 30 * 60_000;
+const SCAN_INTERVAL_MS       = 5 * 60_000;
+const MIN_ALERT_DELAY_MS     = 15 * 60_000;
+const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// BTC security (DISABLED, kept for future)
+// BTC security (conservé pour plus tard, mais NON utilisé)
 const BTC_LONG_MIN  = -0.2;
 const BTC_SHORT_MAX = +0.5;
 
 // État interne
-let DISCOVERY_SYMBOLS = [];
-let lastSymbolUpdate   = 0;
+let DISCOVERY_SYMBOLS   = [];
+let lastSymbolUpdate    = 0;
 let lastGlobalTradeTime = 0;
-const lastAlerts = new Map();
+const lastAlerts        = new Map();
 
-// Fallback midcaps
+// Fallback midcaps (symboles v2 : SANS _UMCBL)
 const FALLBACK_MIDCAPS = [
-  "INJUSDT_UMCBL", "FETUSDT_UMCBL", "RNDRUSDT_UMCBL",
-  "ARBUSDT_UMCBL", "AGIXUSDT_UMCBL"
+  "INJUSDT", "FETUSDT", "RNDRUSDT",
+  "ARBUSDT", "AGIXUSDT"
 ];
 
-// Ignorés
+// Ignorés (symboles v2 : SANS _UMCBL)
 const IGNORE_LIST = [
-  "BTCUSDT_UMCBL","ETHUSDT_UMCBL","BNBUSDT_UMCBL","SOLUSDT_UMCBL","XRPUSDT_UMCBL",
-  "ADAUSDT_UMCBL","DOGEUSDT_UMCBL","AVAXUSDT_UMCBL","DOTUSDT_UMCBL","TRXUSDT_UMCBL",
-  "LINKUSDT_UMCBL","TONUSDT_UMCBL","SUIUSDT_UMCBL","APTUSDT_UMCBL","NEARUSDT_UMCBL",
-  "ARBUSDT_UMCBL","OPUSDT_UMCBL","INJUSDT_UMCBL","ATOMUSDT_UMCBL","AAVEUSDT_UMCBL",
-  "LTCUSDT_UMCBL","UNIUSDT_UMCBL","FILUSDT_UMCBL","XLMUSDT_UMCBL","RUNEUSDT_UMCBL",
-  "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
+  "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT",
+  "ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","TRXUSDT",
+  "LINKUSDT","TONUSDT","SUIUSDT","APTUSDT","NEARUSDT",
+  "ARBUSDT","OPUSDT","INJUSDT","ATOMUSDT","AAVEUSDT",
+  "LTCUSDT","UNIUSDT","FILUSDT","XLMUSDT","RUNEUSDT",
+  "ALGOUSDT","PEPEUSDT","WIFUSDT","TIAUSDT","SEIUSDT"
 ];
 
 // ========= UTILS =========
@@ -47,16 +47,24 @@ const num = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 async function safeGetJson(url){
   try{
     const r = await fetch(url,{ headers:{Accept:"application/json"} });
-    if(!r.ok) return null;
-    return await r.json();
-  }catch{
+    if(!r.ok){
+      console.log(`[API ERROR] HTTP ${r.status} for ${url}`);
+      return null;
+    }
+    const j = await r.json();
+    if(j && j.code && j.code !== "00000"){
+      console.log(`[API ERROR] code=${j.code} msg=${j.msg} url=${url}`);
+    }
+    return j;
+  }catch(e){
+    console.error("[API ERROR] fetch failed:", e.message || e);
     return null;
   }
 }
 
 // ========= API v2 =========
 
-// Candles
+// Candles v2 — symbol format: BTCUSDT, INJUSDT, etc.
 async function getCandles(symbol, seconds, limit=200){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
@@ -67,7 +75,7 @@ async function getCandles(symbol, seconds, limit=200){
   })).sort((a,b)=>a.t-b.t);
 }
 
-// Ticker (API v2)
+// Ticker v2 — symbol: BTCUSDT, INJUSDT, ...
 async function getTicker(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
@@ -75,7 +83,7 @@ async function getTicker(symbol){
   return j?.data ?? null;
 }
 
-// Depth
+// Depth v2 — symbol: BTCUSDT, INJUSDT, ...
 async function getDepth(symbol){
   const j = await safeGetJson(
     `https://api.bitget.com/api/v2/mix/market/depth?symbol=${symbol}&limit=20&productType=usdt-futures`
@@ -83,7 +91,7 @@ async function getDepth(symbol){
   return (j?.data?.bids && j?.data?.asks) ? j.data : null;
 }
 
-// All tickers list
+// All tickers list v2 — productType=usdt-futures
 async function getAllTickers(){
   const j = await safeGetJson(
     "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
@@ -91,10 +99,10 @@ async function getAllTickers(){
   return j?.data ?? [];
 }
 
-// ========= BTC TREND (DISABLED) =========
+// ========= BTC TREND (DÉSACTIVÉ) =========
 async function getBTCTrend(){
-  // Return dummy BTC trend so Discovery does NOT skip
-  return 0; // Always neutral
+  // TEMP : BTC neutre, on ne filtre PAS sur la tendance BTC
+  return 0;
 }
 
 // ========= UPDATE DISCOVERY LIST =========
@@ -105,8 +113,10 @@ async function updateDiscoveryList(){
     return FALLBACK_MIDCAPS;
   }
 
+  // v2: symbol = "BTCUSDT", "INJUSDT", ...
   let list = all.filter(t =>
-    t.symbol.endsWith("_UMCBL") &&
+    typeof t.symbol === "string" &&
+    t.symbol.endsWith("USDT") &&
     !IGNORE_LIST.includes(t.symbol) &&
     (+t.usdtVolume > 5_000_000)
   );
@@ -119,7 +129,12 @@ async function updateDiscoveryList(){
     fs.writeFileSync("./config/discovery_list.json", JSON.stringify(finalList,null,2));
   }catch{}
 
-  return finalList.length ? finalList : FALLBACK_MIDCAPS;
+  if(!finalList.length){
+    console.log("⚠ DiscoveryList vide après filtrage — fallback midcaps.");
+    return FALLBACK_MIDCAPS;
+  }
+
+  return finalList;
 }
 
 // ========= INDICATORS =========
@@ -200,7 +215,11 @@ async function processDiscovery(symbol){
   const lastVol = c5m[c5m.length-1].v;
   const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
   const volRatio = avgVol>0 ? lastVol/avgVol : 1;
-  const change24 = tk.priceChangePercent ? (+tk.priceChangePercent)*100 : 0;
+
+  // attention: suivant l’API, priceChange ou priceChangePercent peut déjà être en %
+  const change24 = tk.priceChangePercent != null
+    ? +tk.priceChangePercent
+    : (tk.priceChange != null ? (+tk.priceChange / last) * 100 : 0);
 
   const depth = await getDepth(symbol);
   let obScore=0, bids=0, asks=0;
@@ -228,7 +247,7 @@ async function processDiscovery(symbol){
 }
 
 // ========= ANALYZE =========
-// BTC removed → btc argument unused but preserved for compatibility
+// BTC param gardé pour compat, mais ignoré (BTC neutral)
 function analyze(rec, btc){
   if(!rec) return null;
 
@@ -241,7 +260,7 @@ function analyze(rec, btc){
 
   let dir=null;
 
-  // Direction based only on price vs VWAP
+  // Direction basée uniquement sur le gap VWAP + orderbook
   if(rec.priceVsVwap>0){
     if(rec.wicks.upper>1.2) return null;
     if(rec.obScore<0) return null;
@@ -262,7 +281,7 @@ function analyze(rec, btc){
   if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
   if((dir==="LONG"&&rec.change24>3)||(dir==="SHORT"&&rec.change24<-3)) score+=10;
 
-  // BTC-neutral boost removed
+  // plus de bonus / malus BTC : BTC neutre
 
   if(score<78) return null;
 
@@ -331,10 +350,9 @@ function antiSpam(symbol,dir){
 async function scanDiscovery(){
   const now=Date.now();
 
-  // BTC DISABLED
+  // BTC neutral pour le moment
   const btc = 0;
-
-  console.log(`🔥 Discovery v1.6.2 — BTC Trend DISABLED (0%)`);
+  console.log(`🔥 Discovery v1.6.3 — BTC Trend DISABLED (0%)`);
 
   if(now-lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
     DISCOVERY_SYMBOLS = await updateDiscoveryList();
@@ -374,8 +392,8 @@ async function scanDiscovery(){
 
   const emoji=best.direction==="LONG"?"🚀":"🪂";
 
-  const msg=
-`⚡ *JTF DISCOVERY v1.6.2* ⚡
+  const msg =
+`⚡ *JTF DISCOVERY v1.6.3* ⚡
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}
@@ -389,7 +407,7 @@ ${emoji} *${best.symbol}* — ${best.direction}
 📘 OB: ${best.obRatio}
 ⚖️ Levier: ${best.levier}
 
-_Momentum Midcaps — BTC Neutral — API v2_`;
+_Momentum Midcaps — BTC Neutral — API v2 v1.6.3_`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
@@ -399,8 +417,8 @@ _Momentum Midcaps — BTC Neutral — API v2_`;
 
 // ========= START =========
 async function main(){
-  console.log("🔥 Discovery v1.6.2 — démarré.");
-  await sendTelegram("🟢 Discovery v1.6.2 lancé (BTC OFF — API v2).");
+  console.log("🔥 Discovery v1.6.3 — démarré.");
+  await sendTelegram("🟢 Discovery v1.6.3 lancé (BTC OFF — API v2).");
   while(true){
     try{ await scanDiscovery(); }
     catch(e){ console.error("DISCOVERY CRASH:",e); }
