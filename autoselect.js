@@ -28,7 +28,7 @@ const SYMBOLS = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
-// ========= LIMITES =========
+// ========= LIMITES (réservé pour futures versions) =========
 const MAX_OI_FOR_SHORT_OK =  0.6;
 const MIN_OI_FOR_LONG_OK  = -0.6;
 
@@ -205,8 +205,8 @@ async function processSymbol(symbol){
   const vwap1h = vwap(c1h.slice(-48));
   const deltaVWAP = vwap1h ? percent(last,vwap1h) : null;
 
-  const MMS_long  = toScore100(-(dP15/2)||0);
-  const MMS_short = toScore100( +(dP15/2)||0);
+  const MMS_long  = toScore100(!(isNaN(dP15)) ? -(dP15/2) : 0);
+  const MMS_short = toScore100(!(isNaN(dP15)) ?  +(dP15/2) : 0);
 
   const deltaVWAPpct = deltaVWAP != null ? +num(deltaVWAP,4) : null;
   const deltaOIpct   = deltaOI   != null ? +num(deltaOI,3)   : null;
@@ -313,7 +313,7 @@ function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoh,r
   if(conf<45) return "AVOID";
   if(rr<1.05) return "AVOID";
 
-  // Pour l’instant : dès que ce n’est pas DEAD/CHOP/WATCH/AVOID, on TAKE.
+  // Dès que toutes les conditions de base sont OK → trade exploitable
   return "TAKE";
 }
 
@@ -406,7 +406,7 @@ async function scanOnce(){
       setupState, fusion.direction, rsiCoherent, rec
     );
 
-    // ✅ FIX : on garde les trades marqués "TAKE"
+    // ✅ PATCH : on garde les vrais trades "TAKE"
     if (reco === "TAKE"){
       candidates.push({
         symbol:     rec.symbol,
@@ -466,7 +466,7 @@ async function scanOnce(){
 // ========= MAIN =========
 export async function startTop30(){
   console.log("🔥 TOP 30 On (v0.8.8)");
-  await sendTelegram("🟢 TOP 30 On");
+  await sendTelegram("🟢 JTF TOP 30 v0.8.8 On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.log("[TOP30 ERROR]",e); }
