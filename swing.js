@@ -429,7 +429,7 @@ async function scanOnce(){
 // ========= MAIN LOOP =========
 export async function startSwing(){
   console.log("🔥 SWING v1.6 On");
-  await sendTelegram("🟢 JTF SWING v1.6 On");
+  await sendTelegram("🟢 SWING On");
   while(true){
     try{
       await scanOnce();
