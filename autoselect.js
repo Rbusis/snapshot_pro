@@ -1,4 +1,4 @@
-// autoselect.js — JTF TOP 30 v0.8.8 (ex-AUTOSELECT, Clean Output + Debug Control + Data Logs)
+// top30.js — v0.8.9 (JTF TOP 30, Clean Output + Debug Control + Data Logs)
 
 import process from "process";
 import fetch from "node-fetch";
@@ -28,7 +28,7 @@ const SYMBOLS = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
-// ========= LIMITES (réservé pour futures versions) =========
+// ========= LIMITES (réservé, pas encore utilisé) =========
 const MAX_OI_FOR_SHORT_OK =  0.6;
 const MIN_OI_FOR_LONG_OK  = -0.6;
 
@@ -195,8 +195,6 @@ async function processSymbol(symbol){
     return null;
   }
 
-  const closes15 = c15m.map(x=>x.c);
-
   const dP15 = closeChange(c15m);
 
   const volaPct = last!=null && high24!=null && low24!=null
@@ -205,8 +203,8 @@ async function processSymbol(symbol){
   const vwap1h = vwap(c1h.slice(-48));
   const deltaVWAP = vwap1h ? percent(last,vwap1h) : null;
 
-  const MMS_long  = toScore100(!(isNaN(dP15)) ? -(dP15/2) : 0);
-  const MMS_short = toScore100(!(isNaN(dP15)) ?  +(dP15/2) : 0);
+  const MMS_long  = toScore100(-(dP15/2)||0);
+  const MMS_short = toScore100( +(dP15/2)||0);
 
   const deltaVWAPpct = deltaVWAP != null ? +num(deltaVWAP,4) : null;
   const deltaOIpct   = deltaOI   != null ? +num(deltaOI,3)   : null;
@@ -272,8 +270,8 @@ function computeConfidence(rec,fusion,setupState,oiImpulse){
 }
 
 function estimateRR(vola){
-  if(vola<2) return 1.4;
-  if(vola<8) return 1.6;
+  if(vola<2)  return 1.4;
+  if(vola<8)  return 1.6;
   if(vola<15) return 1.4;
   return 1.2;
 }
@@ -306,14 +304,21 @@ function buildTradePlan(rec,fusion,jds,rr){
   };
 }
 
-function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoh,rec){
-  if(setupState==="DEAD") return "AVOID";
-  if(setupState==="CHOP") return "WAIT";
-  if(setupState==="WATCH") return "WAIT";
-  if(conf<45) return "AVOID";
-  if(rr<1.05) return "AVOID";
+// ========= RECO (TAKE / WAIT / AVOID) =========
+// TAKE seulement pour JDS >= 80 (SETUP_READY / SETUP_PRIME)
+function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, dir, rsiCoh, rec){
+  // États faibles → on oublie
+  if (setupState === "DEAD")  return "AVOID";
+  if (setupState === "CHOP")  return "AVOID";
+  if (setupState === "WATCH") return "WAIT";
 
-  // Dès que toutes les conditions de base sont OK → trade exploitable
+  // 70–80 : EMERGENT → on observe mais on ne trade pas
+  if (setupState === "SETUP_EMERGENT") return "WAIT";
+
+  // À partir d'ici : SETUP_READY (80–90) ou SETUP_PRIME (90+)
+  if (conf < 45) return "AVOID";
+  if (rr   < 1.05) return "AVOID";
+
   return "TAKE";
 }
 
@@ -381,7 +386,7 @@ async function scanOnce(){
     await sleep(800);
   }
 
-  // Market noise check
+  // Market noise check (BTC)
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
   if (btcRec && isNoisyMarket(btcRec)){
     const ms = Date.now() - t0;
@@ -406,7 +411,7 @@ async function scanOnce(){
       setupState, fusion.direction, rsiCoherent, rec
     );
 
-    // ✅ PATCH : on garde les vrais trades "TAKE"
+    // On ne garde que les vrais trades "TAKE"
     if (reco === "TAKE"){
       candidates.push({
         symbol:     rec.symbol,
@@ -464,15 +469,12 @@ async function scanOnce(){
 }
 
 // ========= MAIN =========
-export async function startTop30(){
-  console.log("🔥 TOP 30 On (v0.8.8)");
-  await sendTelegram("🟢 JTF TOP 30 v0.8.8 On");
+export async function startAutoselect(){
+  console.log("🔥 TOP 30 On (v0.8.9)");
+  await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.log("[TOP30 ERROR]",e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
-
-// Compatibilité avec l'ancien nom (index.js utilise encore startAutoselect)
-export const startAutoselect = startTop30;
