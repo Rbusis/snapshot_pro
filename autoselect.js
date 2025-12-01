@@ -1,4 +1,4 @@
-// autoselect.js — v0.8.7 (Clean Output + Debug Control + Data Logs)
+// autoselect.js — JTF TOP 30 v0.8.8 (ex-AUTOSELECT, Clean Output + Debug Control + Data Logs)
 
 import process from "process";
 import fetch from "node-fetch";
@@ -14,7 +14,7 @@ const MIN_ALERT_DELAY_MS  = 3 * 60_000;
 // ========= DEBUG =========
 function logDebug(...args){
   if (DEBUG.global || DEBUG.autoselect){
-    console.log("[AUTOSELECT DEBUG]", ...args);
+    console.log("[TOP30 DEBUG]", ...args);
   }
 }
 
@@ -158,7 +158,7 @@ async function processSymbol(symbol){
   ]);
 
   if(!tk){
-    console.log(`[AUTO DROP] ${symbol} — no ticker data`);
+    console.log(`[TOP30 DROP] ${symbol} — no ticker data`);
     return null;
   }
 
@@ -168,7 +168,7 @@ async function processSymbol(symbol){
   const low24   = tk.low24h  != null ? +tk.low24h  : null;
 
   if(!last || last <= 0){
-    console.log(`[AUTO DROP] ${symbol} — invalid price: ${lastRaw}`);
+    console.log(`[TOP30 DROP] ${symbol} — invalid price: ${lastRaw}`);
     return null;
   }
 
@@ -189,7 +189,7 @@ async function processSymbol(symbol){
 
   if(!c1m.length||!c5m.length||!c15m.length||!c1h.length||!c4h.length){
     console.log(
-      `[AUTO DROP] ${symbol} — missing candles ` +
+      `[TOP30 DROP] ${symbol} — missing candles ` +
       `(1m=${c1m.length},5m=${c5m.length},15m=${c15m.length},1h=${c1h.length},4h=${c4h.length})`
     );
     return null;
@@ -213,7 +213,7 @@ async function processSymbol(symbol){
 
   // Log pour vérifier les data reçues
   console.log(
-    `[AUTO DATA] ${symbol} | P=${last} | Vola=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
+    `[TOP30 DATA] ${symbol} | P=${last} | Vola=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
     `ΔVWAP=${deltaVWAPpct!=null?deltaVWAPpct.toFixed(4):"n/a"} | ΔOI=${deltaOIpct!=null?deltaOIpct.toFixed(3):"n/a"} | ` +
     `MMS_L=${MMS_long.toFixed(1)} | MMS_S=${MMS_short.toFixed(1)}`
   );
@@ -313,7 +313,8 @@ function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoh,r
   if(conf<45) return "AVOID";
   if(rr<1.05) return "AVOID";
 
-  return setupState==="SETUP_PRIME" ? "TAKE" : "TAKE";
+  // Pour l’instant : dès que ce n’est pas DEAD/CHOP/WATCH/AVOID, on TAKE.
+  return "TAKE";
 }
 
 // ========= ANTI-SPAM =========
@@ -354,7 +355,6 @@ function isNoisyMarket(rec){
   const dVW  = rec.deltaVWAPpct;
   const dOI  = rec.deltaOIpct;
 
-  // tend24 n'est pas calculé dans cette version → on ne l'utilise pas
   if (vola == null || dVW == null || dOI == null) return false;
 
   return (
@@ -367,7 +367,7 @@ function isNoisyMarket(rec){
 // ========= SCAN =========
 async function scanOnce(){
   const t0 = Date.now();
-  console.log("🔍 [AUTOSELECT] SCAN STARTED...");
+  console.log("🔍 [TOP30] SCAN STARTED...");
 
   const snapshots = [];
   const BATCH     = 5;
@@ -381,11 +381,11 @@ async function scanOnce(){
     await sleep(800);
   }
 
-  // Market noise check (facultatif mais conservé)
+  // Market noise check
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
   if (btcRec && isNoisyMarket(btcRec)){
     const ms = Date.now() - t0;
-    console.log(`[AUTOSELECT] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | MARKET NOISE`);
+    console.log(`[TOP30] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | MARKET NOISE`);
     return;
   }
 
@@ -406,10 +406,8 @@ async function scanOnce(){
       setupState, fusion.direction, rsiCoherent, rec
     );
 
-    // NOTE: ta condition d'origine utilise reco.includes("SETUP")
-    // alors que reco vaut "TAKE" / "WAIT" / "AVOID".
-    // Je la laisse telle quelle pour ne pas changer ton comportement.
-    if (reco.includes("SETUP")){
+    // ✅ FIX : on garde les trades marqués "TAKE"
+    if (reco === "TAKE"){
       candidates.push({
         symbol:     rec.symbol,
         direction:  fusion.direction,
@@ -427,7 +425,7 @@ async function scanOnce(){
   }
 
   const ms = Date.now() - t0;
-  console.log(`[AUTOSELECT] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | ${candidates.length} SETUP`);
+  console.log(`[TOP30] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | ${candidates.length} SETUP`);
 
   if (!candidates.length){
     return;
@@ -448,7 +446,7 @@ async function scanOnce(){
   );
   if (!fresh.length) return;
 
-  const lines = ["📊 *JTF v0.8.7 AUTOSELECT — Signaux Confirmés*"];
+  const lines = ["📊 *JTF TOP 30 — Signaux Confirmés*"];
   fresh.forEach((c, idx) => {
     const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
     const tpStr    = c.plan.tp2 ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
@@ -466,12 +464,15 @@ async function scanOnce(){
 }
 
 // ========= MAIN =========
-export async function startAutoselect(){
-  console.log("🔥 AUTOSELECT On (v0.8.7)");
-  await sendTelegram("🟢 AUTOSELECT v0.8.7 On");
+export async function startTop30(){
+  console.log("🔥 TOP 30 On (v0.8.8)");
+  await sendTelegram("🟢 TOP 30 On");
   while(true){
     try{ await scanOnce(); }
-    catch(e){ console.log("[AUTOSELECT ERROR]",e); }
+    catch(e){ console.log("[TOP30 ERROR]",e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
+
+// Compatibilité avec l'ancien nom (index.js utilise encore startAutoselect)
+export const startAutoselect = startTop30;
