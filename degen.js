@@ -402,7 +402,7 @@ _Wait for limit — sniper mode._`;
 // ========= START =========
 export async function startDegen(){
   console.log("🔥 DEGEN v3.2 On (5m)");
-  await sendTelegram("🟢 DEGEN v3.2 (5m) On");
+  await sendTelegram("🟢 DEGEN On");
   while(true){
     try{ await scanDegen(); }
     catch(e){ console.log("[DEGEN ERROR]", e); }
