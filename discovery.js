@@ -1,8 +1,9 @@
-// discovery.js — JTF DISCOVERY v1.8 (Clean Output + API v2 + Debug Control)
+// discovery.js — JTF DISCOVERY v1.9 (API v2 + Debug + Registry Anti-Doublons)
 
 import fetch from "node-fetch";
 import fs from "fs";
 import { DEBUG } from "./debug.js";
+import { isRecentlySignaled, registerSignal } from "./signals_registry.js";
 
 // ========= DEBUG =========
 function logDebug(...args){
@@ -20,7 +21,7 @@ const MIN_ALERT_DELAY_MS     = 15 * 60_000;
 const GLOBAL_COOLDOWN_MS     = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 
-// BTC Trend désactivé
+// BTC Trend désactivé (placeholder si on veut le remettre plus tard)
 const BTC_LONG_MIN  = -0.2;
 const BTC_SHORT_MAX = +0.5;
 
@@ -141,8 +142,7 @@ async function processDiscovery(symbol){
   const tk = await getTicker(symbol);
   if(!tk) return null;
 
-  const last =
-    (tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN);
+  const last = (tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN);
 
   if(!last || Number.isNaN(last)){
     logDebug("invalid last", symbol);
@@ -173,7 +173,7 @@ async function processDiscovery(symbol){
   const priceVsVwap = vwp ? ((last-vwp)/vwp)*100 : 0;
 
   const lastC = c5m[c5m.length-1];
-  const wick = wicks(lastC);
+  const wick  = wicks(lastC);
 
   const lastVol = lastC.v;
   const avgVol  = c5m.slice(-11,-1).reduce((a,b)=>a+b.v,0)/10;
@@ -194,6 +194,13 @@ async function processDiscovery(symbol){
     }
   }
 
+  // Log DATA si besoin (optionnel)
+  console.log(
+    `[DISCOVERY DATA] ${symbol} | P=${last} | Vola=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
+    `volRatio=${volRatio.toFixed(2)} | ΔVWAP=${priceVsVwap.toFixed(2)} | ` +
+    `RSI5=${rsi5!=null?rsi5.toFixed(1):"n/a"} | OB=${obScore}`
+  );
+
   return {
     symbol,last,volaPct,rsi5,rsi15,priceVsVwap,
     volRatio,change24,obScore,bidsVol:bids,asksVol:asks,wicks:wick
@@ -204,90 +211,59 @@ async function processDiscovery(symbol){
 function analyze(rec){
   if(!rec) return null;
 
-  // 1) Filtres de base (marché "raisonnable")
-  if(rec.volRatio == null || rec.volRatio < 2) return null;
-  if(rec.volaPct == null || rec.volaPct < 5 || rec.volaPct > 35) return null;
+  // Vol spike suffisant
+  if(rec.volRatio < 2) return null;
 
-  const gap = Math.abs(rec.priceVsVwap ?? 0);
-  if(gap < 0.8 || gap > 2.4) return null;
+  // Vola 24h : ni morte ni trop casino
+  if(rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 22) return null;
 
-  // RSI requis pour une lecture cohérente
-  if(rec.rsi5 == null || rec.rsi15 == null) return null;
+  const gap=Math.abs(rec.priceVsVwap);
+  // Gap vs VWAP : fenêtre "judicieuse"
+  if(gap < 0.6 || gap > 3.2) return null;
 
-  let dir = null;
+  let dir=null;
 
-  if(rec.priceVsVwap > 0){
-    // --------- LONG filters ----------
-    if(rec.rsi5 < 55) return null;
-    if(rec.rsi15 < 50) return null;
-    if(rec.wicks && rec.wicks.upper > 1.2) return null;
-    if(rec.obScore < 0) return null;
-    if(rec.change24 < -3) return null;
-
-    // Anti-exhaustion : top local
-    if(rec.rsi5 > 78 && rec.priceVsVwap > 2.0) return null;
-
-    dir = "LONG";
+  if(rec.priceVsVwap>0){
+    if(rec.wicks.upper>1.2) return null;
+    if(rec.obScore<0) return null;
+    dir="LONG";
   } else {
-    // --------- SHORT filters ----------
-    if(rec.rsi5 > 45) return null;
-    if(rec.rsi15 > 50) return null;
-    if(rec.wicks && rec.wicks.lower > 1.2) return null;
-    if(rec.obScore > 0) return null;
-    if(rec.change24 > 3) return null;
-
-    // Anti-exhaustion : bottom local
-    if(rec.rsi5 < 22 && rec.priceVsVwap < -2.0) return null;
-
-    dir = "SHORT";
+    if(rec.wicks.lower>1.2) return null;
+    if(rec.obScore>0) return null;
+    dir="SHORT";
   }
 
-  // 2) SCORE
   let score=0;
-  // Volume spike
   score += rec.volRatio>=3 ? 30 : 15;
-  // Gap VWAP dans sweet spot
   score += (gap>=1 && gap<=2.2) ? 20 : 10;
-  // RSI 5m selon direction
   score += (dir==="LONG"
-    ? (rec.rsi5>=55 && rec.rsi5<=75 ? 15 : 5)
-    : (rec.rsi5>=25 && rec.rsi5<=45 ? 15 : 5)
+    ? (rec.rsi5>=55&&rec.rsi5<=75?15:5)
+    : (rec.rsi5>=25&&rec.rsi5<=45?15:5)
   );
-  // Orderbook
   if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
-  // Change 24h cohérent avec la direction
   if((dir==="LONG"&&rec.change24>0)||(dir==="SHORT"&&rec.change24<0)) score+=10;
 
-  // Seuil minimal un peu plus haut
-  if(score < 80) return null;
+  if(score<78) return null;
 
-  // Sur-score + gap trop grand → souvent exhaustion
-  if(score > 95 && gap > 2.2) return null;
+  const decimals = rec.last<1?5:3;
+  const gapPc = gap/100;
 
-  // 3) Plan de trade : Entry / SL / TP / levier
-  const decimals = rec.last<1 ? 5 : 3;
-  const gapPc = gap / 100;
-
-  // Entry plus profonde si gap fort
-  const entryFactor = gap <= 1.5 ? 0.25 : 0.40;
-
+  // Limit order (retrace contrôlé)
   const entry = dir==="LONG"
-    ? rec.last * (1 - gapPc * entryFactor)
-    : rec.last * (1 + gapPc * entryFactor);
+    ? rec.last*(1-gapPc*0.25)
+    : rec.last*(1+gapPc*0.25);
 
-  // Risque plafonné un peu plus bas, TP légèrement plus proche
-  const riskPct = clamp((rec.volaPct/5)*2, 2, 4);
+  const riskPct = clamp((rec.volaPct/5)*2,2,5);
 
   const sl = dir==="LONG"
-    ? rec.last * (1 - riskPct/100)
-    : rec.last * (1 + riskPct/100);
+    ? rec.last*(1-riskPct/100)
+    : rec.last*(1+riskPct/100);
 
   const tp = dir==="LONG"
-    ? rec.last * (1 + (riskPct*1.8)/100)
-    : rec.last * (1 - (riskPct*1.8)/100);
+    ? rec.last*(1+(riskPct*2)/100)
+    : rec.last*(1-(riskPct*2)/100);
 
-  // Levier : plus prudent quand le risque est élevé
-  const lev = riskPct > 3.5 ? "2x" : "3x";
+  const lev = riskPct>4 ? "2x" : "3x";
 
   return {
     symbol:rec.symbol,
@@ -335,7 +311,7 @@ async function scanDiscovery(){
   console.log("🔍 [DISCOVERY] SCAN STARTED...");
 
   const now = start;
-  const btcTrend = 0;
+  const btcTrend = 0; // placeholder si on veut remettre un filtre BTC plus tard
 
   // Refresh liste
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length){
@@ -363,7 +339,7 @@ async function scanDiscovery(){
     const batch = DISCOVERY_SYMBOLS.slice(i, i + BATCH);
     const res   = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res){
-      const s = analyze(r, btcTrend); // btcTrend ignoré, mais on garde la signature d'appel
+      const s = analyze(r, btcTrend); // btcTrend ignoré mais on laisse la signature
       if (s) signals.push(s);
     }
     await sleep(200);
@@ -377,6 +353,12 @@ async function scanDiscovery(){
   }
 
   const best = signals.sort((a,b)=>b.score-a.score)[0];
+
+  // 🔁 Éviter doublons avec les autres bots (DEGEN, SWING, TOP30…)
+  if (isRecentlySignaled(best.symbol)) {
+    console.log(`[DISCOVERY SKIP] ${best.symbol} — déjà signalé récemment par un autre bot`);
+    return;
+  }
 
   if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
     console.log(`[DISCOVERY] COOLDOWN — ${best.symbol}`);
@@ -393,28 +375,31 @@ async function scanDiscovery(){
   const emoji = best.direction==="LONG" ? "🚀" : "🪂";
 
   const msg =
-`⚡ *JTF DISCOVERY v1.7* ⚡
+`⚡ *JTF DISCOVERY v1.9* ⚡
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}
 
-💠 Entry: ${best.limitEntry}
+💠 Entry (limit): ${best.limitEntry}
 🎯 TP: ${best.tp}
 🛑 SL: ${best.sl}
 
-📊 Vol: x${best.volRatio}
-🌡️ Vola: ${best.vola}%
-📘 OB: ${best.obRatio}
-⚖️ Levier: ${best.levier}`;
+📊 Vol Spike: x${best.volRatio}
+🌡️ Vola24: ${best.vola}%
+📘 Orderbook: ${best.obRatio}
+⚖️ Levier suggéré: ${best.levier}`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
+
+  // Enregistrer le signal dans le registre global
+  registerSignal("DISCOVERY", best.symbol, best.direction);
 }
 
 // ========= MAIN =========
 export async function startDiscovery(){
-  console.log("🔥 DISCOVERY On");
-  await sendTelegram("🟢 DISCOVERY On");
+  console.log("🔥 DISCOVERY v1.9 On");
+  await sendTelegram("🟢 DISCOVERY v1.9 On");
   while(true){
     try{
       await scanDiscovery();
