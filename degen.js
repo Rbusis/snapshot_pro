@@ -1,7 +1,9 @@
-// degen.js — JTF DEGEN v3.2 (API v2, 5m candles + DROP/DATA Logs)
+// degen.js — JTF DEGEN v3.3
+// API v2, 5m candles, filtres scalping, anti-top/bottom, registry anti-doublons
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
+import { isRecentlySignaled, registerSignal } from "./signals_registry.js";
 
 // ========= DEBUG =========
 function logDebug(...args) {
@@ -173,7 +175,7 @@ async function processDegen(symbol){
     ? ((high24-low24)/last)*100
     : null;
 
-  // ⏱️ 5m & 15m au lieu de 3m & 15m
+  // 5m & 15m
   const [c5m,c15m] = await Promise.all([
     getCandles(symbol,300,120),
     getCandles(symbol,900,120)
@@ -236,53 +238,94 @@ async function processDegen(symbol){
 function analyzeCandidate(rec){
   if(!rec) return null;
 
-  if(rec.volRatio < 2.0) return null;
-  if(rec.volaPct  == null || rec.volaPct < 3 || rec.volaPct > 20) return null;
+  // Vol spike un peu plus exigeant
+  if(rec.volRatio < 2.5) return null;
+
+  // Volatilité : éviter le mort et le full casino
+  if(rec.volaPct == null || rec.volaPct < 5 || rec.volaPct > 40) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  if(gap < 0.7 || gap > 3.0) return null;
+  // Gap vs VWAP : pas trop petit, pas trop extrême
+  if(gap < 0.8 || gap > 2.8) return null;
 
-  let dir=null;
+  let dir = null;
 
-  if(rec.priceVsVwap>0){
-    if(rec.wicks.upper>1.3) return null;
-    if(rec.obScore<0) return null;
-    dir="LONG";
+  if(rec.priceVsVwap > 0){
+    if(rec.wicks.upper > 1.3) return null;
+    if(rec.obScore < 0) return null;
+    dir = "LONG";
   } else {
-    if(rec.wicks.lower>1.3) return null;
-    if(rec.obScore>0) return null;
-    dir="SHORT";
+    if(rec.wicks.lower > 1.3) return null;
+    if(rec.obScore > 0) return null;
+    dir = "SHORT";
   }
 
-  let score=0;
-  score += rec.volRatio>=3 ? 30 : 15;
-  score += (gap>=1 && gap<=2.2) ? 20 : 10;
-  score += (dir==="LONG"
-    ? (rec.rsi5>=55&&rec.rsi5<=75?15:5)
-    : (rec.rsi5>=25&&rec.rsi5<=45?15:5)
-  );
-  if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
+  // Anti-top / anti-bottom : éviter le sommet/bas du spike
+  if (dir === "LONG" && rec.rsi5 != null && rec.rsi5 > 80 && gap > 2.3) {
+    return null;
+  }
+  if (dir === "SHORT" && rec.rsi5 != null && rec.rsi5 < 20 && gap > 2.3) {
+    return null;
+  }
 
-  if(score<78) return null;
+  // Score DEGEN (énergie du setup)
+  let score = 0;
 
-  const decimals = rec.last<1?5:3;
-  const gapPc = gap/100;
+  // Vol spike
+  score += rec.volRatio >= 3.5 ? 32 : rec.volRatio >= 3 ? 26 : 18;
 
-  const entry = dir==="LONG"
-    ? rec.last*(1-gapPc*0.25)
-    : rec.last*(1+gapPc*0.25);
+  // Gap "sweet spot"
+  if (gap >= 1 && gap <= 2.0) score += 22;
+  else if (gap >= 0.8 && gap <= 2.4) score += 14;
+  else score += 6;
 
-  const riskPct = clamp((rec.volaPct/5)*2,2,5);
+  // RSI court terme cohérent
+  if (dir === "LONG"){
+    if (rec.rsi5 >= 52 && rec.rsi5 <= 72) score += 18;
+    else if (rec.rsi5 >= 48 && rec.rsi5 <= 78) score += 8;
+  } else {
+    if (rec.rsi5 >= 28 && rec.rsi5 <= 48) score += 18;
+    else if (rec.rsi5 >= 22 && rec.rsi5 <= 52) score += 8;
+  }
 
-  const sl = dir==="LONG"
-    ? rec.last*(1-riskPct/100)
-    : rec.last*(1+riskPct/100);
+  // Orderbook dans le bon sens
+  if ((dir === "LONG" && rec.obScore === 1) || (dir === "SHORT" && rec.obScore === -1)){
+    score += 16;
+  }
 
-  const tp = dir==="LONG"
-    ? rec.last*(1+(riskPct*2)/100)
-    : rec.last*(1-(riskPct*2)/100);
+  // Petit malus si gap très proche de la limite haute (plus risqué)
+  if (gap > 2.4) score -= 6;
 
-  const lev = riskPct>4 ? "2x" : "3x";
+  if (score < 80) return null;
+
+  // ======================
+  // Entry LIMIT, SL, TP
+  // ======================
+  const decimals = rec.last < 1 ? 5 : 3;
+  const gapPc    = gap / 100;
+
+  // Limit order : retracement moins profond que Discovery
+  const retraceFactor = gap <= 1.2 ? 0.20 : 0.30;
+
+  const entry = dir === "LONG"
+    ? rec.last * (1 - gapPc * retraceFactor)
+    : rec.last * (1 + gapPc * retraceFactor);
+
+  // Risque scalping : 1.5–3.5 % max
+  const riskPct = clamp(rec.volaPct / 8, 1.5, 3.5);
+
+  const sl = dir === "LONG"
+    ? entry * (1 - riskPct/100)
+    : entry * (1 + riskPct/100);
+
+  // TP plus proche : ~1.5–1.7 R
+  const rr = gap <= 1.2 ? 1.5 : 1.7;
+
+  const tp = dir === "LONG"
+    ? entry * (1 + (riskPct * rr)/100)
+    : entry * (1 - (riskPct * rr)/100);
+
+  const lev = riskPct > 2.8 ? "2x" : "3x";
 
   return {
     symbol:rec.symbol,
@@ -296,7 +339,8 @@ function analyzeCandidate(rec){
     levier:lev,
     entry:num(entry,decimals),
     sl:num(sl,decimals),
-    tp:num(tp,decimals)
+    tp:num(tp,decimals),
+    rr
   };
 }
 
@@ -332,7 +376,7 @@ async function scanDegen(){
 
   const now = start;
 
-  // Mise à jour liste
+  // Mise à jour liste dynamique
   if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DEGEN_SYMBOLS.length){
     DEGEN_SYMBOLS    = await updateDegenList();
     lastSymbolUpdate = now;
@@ -362,6 +406,12 @@ async function scanDegen(){
 
   const best = candidates.sort((a,b)=>b.score-a.score)[0];
 
+  // 🔁 Éviter doublons avec les autres bots (Discovery, etc.)
+  if (isRecentlySignaled(best.symbol)) {
+    console.log(`[DEGEN SKIP] ${best.symbol} — déjà signalé récemment par un autre bot`);
+    return;
+  }
+
   if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS){
     console.log(`[DEGEN] COOLDOWN — ${best.symbol}`);
     return;
@@ -377,7 +427,7 @@ async function scanDegen(){
   const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
 
   const msg =
-`🎯 *JTF DEGEN v3.2 (API v2, 5m)*
+`🎯 *JTF DEGEN v3.3 (API v2, 5m)*
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
@@ -386,23 +436,25 @@ ${emoji} *${best.symbol}* — ${best.direction}
 🌡️ Vola24: ${num(best.volaPct,2)}%
 📉 ΔVWAP: ${num(best.priceVsVwap,2)}%
 
-💰 Prix: ${best.last}
-🏹 Entry: ${best.entry}
+💰 Prix spot: ${best.last}
+🏹 Entry LIMIT: ${best.entry}
 🛑 SL: ${best.sl}
 🎯 TP: ${best.tp}
+📏 R:R ≈ ${best.rr.toFixed(2)}
 
-⚖️ Levier: ${best.levier}
+⚖️ Levier suggéré: ${best.levier}
 
 _Wait for limit — sniper mode._`;
 
+  registerSignal("DEGEN", best.symbol, best.direction);
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
 }
 
 // ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN v3.2 On (5m)");
-  await sendTelegram("🟢 DEGEN On");
+  console.log("🔥 DEGEN v3.3 On (5m scalps)");
+  await sendTelegram("🟢 DEGEN v3.3 On");
   while(true){
     try{ await scanDegen(); }
     catch(e){ console.log("[DEGEN ERROR]", e); }
