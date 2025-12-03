@@ -204,54 +204,90 @@ async function processDiscovery(symbol){
 function analyze(rec){
   if(!rec) return null;
 
-  if(rec.volRatio < 2) return null;
-  if(rec.volaPct < 3 || rec.volaPct > 22) return null;
+  // 1) Filtres de base (marché "raisonnable")
+  if(rec.volRatio == null || rec.volRatio < 2) return null;
+  if(rec.volaPct == null || rec.volaPct < 5 || rec.volaPct > 35) return null;
 
-  const gap=Math.abs(rec.priceVsVwap);
-  if(gap < 0.6 || gap > 3.2) return null;
+  const gap = Math.abs(rec.priceVsVwap ?? 0);
+  if(gap < 0.8 || gap > 2.4) return null;
 
-  let dir=null;
+  // RSI requis pour une lecture cohérente
+  if(rec.rsi5 == null || rec.rsi15 == null) return null;
 
-  if(rec.priceVsVwap>0){
-    if(rec.wicks.upper>1.2) return null;
-    if(rec.obScore<0) return null;
-    dir="LONG";
+  let dir = null;
+
+  if(rec.priceVsVwap > 0){
+    // --------- LONG filters ----------
+    if(rec.rsi5 < 55) return null;
+    if(rec.rsi15 < 50) return null;
+    if(rec.wicks && rec.wicks.upper > 1.2) return null;
+    if(rec.obScore < 0) return null;
+    if(rec.change24 < -3) return null;
+
+    // Anti-exhaustion : top local
+    if(rec.rsi5 > 78 && rec.priceVsVwap > 2.0) return null;
+
+    dir = "LONG";
   } else {
-    if(rec.wicks.lower>1.2) return null;
-    if(rec.obScore>0) return null;
-    dir="SHORT";
+    // --------- SHORT filters ----------
+    if(rec.rsi5 > 45) return null;
+    if(rec.rsi15 > 50) return null;
+    if(rec.wicks && rec.wicks.lower > 1.2) return null;
+    if(rec.obScore > 0) return null;
+    if(rec.change24 > 3) return null;
+
+    // Anti-exhaustion : bottom local
+    if(rec.rsi5 < 22 && rec.priceVsVwap < -2.0) return null;
+
+    dir = "SHORT";
   }
 
+  // 2) SCORE
   let score=0;
+  // Volume spike
   score += rec.volRatio>=3 ? 30 : 15;
+  // Gap VWAP dans sweet spot
   score += (gap>=1 && gap<=2.2) ? 20 : 10;
+  // RSI 5m selon direction
   score += (dir==="LONG"
-    ? (rec.rsi5>=55&&rec.rsi5<=75?15:5)
-    : (rec.rsi5>=25&&rec.rsi5<=45?15:5)
+    ? (rec.rsi5>=55 && rec.rsi5<=75 ? 15 : 5)
+    : (rec.rsi5>=25 && rec.rsi5<=45 ? 15 : 5)
   );
+  // Orderbook
   if((dir==="LONG"&&rec.obScore===1)||(dir==="SHORT"&&rec.obScore===-1)) score+=15;
+  // Change 24h cohérent avec la direction
   if((dir==="LONG"&&rec.change24>0)||(dir==="SHORT"&&rec.change24<0)) score+=10;
 
-  if(score<78) return null;
+  // Seuil minimal un peu plus haut
+  if(score < 80) return null;
 
-  const decimals = rec.last<1?5:3;
-  const gapPc = gap/100;
+  // Sur-score + gap trop grand → souvent exhaustion
+  if(score > 95 && gap > 2.2) return null;
+
+  // 3) Plan de trade : Entry / SL / TP / levier
+  const decimals = rec.last<1 ? 5 : 3;
+  const gapPc = gap / 100;
+
+  // Entry plus profonde si gap fort
+  const entryFactor = gap <= 1.5 ? 0.25 : 0.40;
 
   const entry = dir==="LONG"
-    ? rec.last*(1-gapPc*0.25)
-    : rec.last*(1+gapPc*0.25);
+    ? rec.last * (1 - gapPc * entryFactor)
+    : rec.last * (1 + gapPc * entryFactor);
 
-  const riskPct = clamp((rec.volaPct/5)*2,2,5);
+  // Risque plafonné un peu plus bas, TP légèrement plus proche
+  const riskPct = clamp((rec.volaPct/5)*2, 2, 4);
 
   const sl = dir==="LONG"
-    ? rec.last*(1-riskPct/100)
-    : rec.last*(1+riskPct/100);
+    ? rec.last * (1 - riskPct/100)
+    : rec.last * (1 + riskPct/100);
 
   const tp = dir==="LONG"
-    ? rec.last*(1+(riskPct*2)/100)
-    : rec.last*(1-(riskPct*2)/100);
+    ? rec.last * (1 + (riskPct*1.8)/100)
+    : rec.last * (1 - (riskPct*1.8)/100);
 
-  const lev = riskPct>4 ? "2x" : "3x";
+  // Levier : plus prudent quand le risque est élevé
+  const lev = riskPct > 3.5 ? "2x" : "3x";
 
   return {
     symbol:rec.symbol,
@@ -327,7 +363,7 @@ async function scanDiscovery(){
     const batch = DISCOVERY_SYMBOLS.slice(i, i + BATCH);
     const res   = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res){
-      const s = analyze(r, btcTrend);
+      const s = analyze(r, btcTrend); // btcTrend ignoré, mais on garde la signature d'appel
       if (s) signals.push(s);
     }
     await sleep(200);
