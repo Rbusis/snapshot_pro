@@ -1,4 +1,4 @@
-// top30.js — v0.8.9 (JTF TOP 30, Clean Output + Debug Control + Data Logs)
+// top30.js — v0.8.8 (ex-AUTOSELECT) — JTF TOP 30 (Bitget USDT Perp)
 
 import process from "process";
 import fetch from "node-fetch";
@@ -28,9 +28,10 @@ const SYMBOLS = [
   "ALGOUSDT_UMCBL","PEPEUSDT_UMCBL","WIFUSDT_UMCBL","TIAUSDT_UMCBL","SEIUSDT_UMCBL"
 ];
 
-// ========= LIMITES (réservé, pas encore utilisé) =========
-const MAX_OI_FOR_SHORT_OK =  0.6;
-const MIN_OI_FOR_LONG_OK  = -0.6;
+// ========= LIMITES =========
+// utilisées maintenant pour filtrer les trades
+const MAX_OI_FOR_SHORT_OK =  +0.6;  // SHORT autorisé seulement si ΔOI <= +0.6 %
+const MIN_OI_FOR_LONG_OK  =  -0.6;  // LONG autorisé seulement si ΔOI >= -0.6 %
 
 // ========= STATE =========
 const prevOI     = new Map();
@@ -209,7 +210,6 @@ async function processSymbol(symbol){
   const deltaVWAPpct = deltaVWAP != null ? +num(deltaVWAP,4) : null;
   const deltaOIpct   = deltaOI   != null ? +num(deltaOI,3)   : null;
 
-  // Log pour vérifier les data reçues
   console.log(
     `[TOP30 DATA] ${symbol} | P=${last} | Vola=${volaPct!=null?volaPct.toFixed(2):"n/a"}% | ` +
     `ΔVWAP=${deltaVWAPpct!=null?deltaVWAPpct.toFixed(4):"n/a"} | ΔOI=${deltaOIpct!=null?deltaOIpct.toFixed(3):"n/a"} | ` +
@@ -242,7 +242,7 @@ function getSetupState(jds){
   return "SETUP_PRIME";
 }
 
-function isRSICoherent(){ return true; }
+function isRSICoherent(){ return true; } // placeholder (RSI pas encore recalcé dans cette version)
 
 function getOiImpulse(oi,vola){
   if(oi==null||vola==null) return {score:0,label:"neutre"};
@@ -270,8 +270,9 @@ function computeConfidence(rec,fusion,setupState,oiImpulse){
 }
 
 function estimateRR(vola){
-  if(vola<2)  return 1.4;
-  if(vola<8)  return 1.6;
+  if(vola == null) return 1.2;
+  if(vola<2) return 1.4;
+  if(vola<8) return 1.6;
   if(vola<15) return 1.4;
   return 1.2;
 }
@@ -305,21 +306,36 @@ function buildTradePlan(rec,fusion,jds,rr){
 }
 
 // ========= RECO (TAKE / WAIT / AVOID) =========
-// TAKE seulement pour JDS >= 80 (SETUP_READY / SETUP_PRIME)
-function computeRecommendation(jds, conf, rr, oiImpulse, dVW, setupState, dir, rsiCoh, rec){
-  // États faibles → on oublie
-  if (setupState === "DEAD")  return "AVOID";
-  if (setupState === "CHOP")  return "AVOID";
-  if (setupState === "WATCH") return "WAIT";
+function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoh,rec){
+  const vola = rec.volaPct;
+  const dOi  = rec.deltaOIpct;
 
-  // 70–80 : EMERGENT → on observe mais on ne trade pas
-  if (setupState === "SETUP_EMERGENT") return "WAIT";
+  // marché trop mou → AVOID
+  if (vola != null && vola < 2.0) return "AVOID";
 
-  // À partir d'ici : SETUP_READY (80–90) ou SETUP_PRIME (90+)
-  if (conf < 45) return "AVOID";
-  if (rr   < 1.05) return "AVOID";
+  // ΔVWAP doit être significatif, mais pas extrême
+  if (dVW == null || Math.abs(dVW) < 0.8 || Math.abs(dVW) > 3.0) return "AVOID";
 
-  return "TAKE";
+  // setupState minimal
+  if (setupState === "DEAD" || setupState === "CHOP") return "AVOID";
+  if (setupState === "WATCH" || setupState === "SETUP_EMERGENT") return "WAIT";
+
+  // à partir d’ici : SETUP_READY ou SETUP_PRIME
+  if (conf < 55) return "WAIT";
+  if (rr < 1.3)  return "WAIT";
+
+  // Filtre ΔOI directionnel (on utilise enfin les constantes)
+  if (dOi != null){
+    if (dir === "LONG"  && dOi < MIN_OI_FOR_LONG_OK)  return "WAIT"; // OI pas assez soutenu
+    if (dir === "SHORT" && dOi > MAX_OI_FOR_SHORT_OK) return "WAIT"; // OI pas assez purgé
+  }
+
+  // On ne TAKE que les setups PRIMES avec assez de confiance
+  if (setupState === "SETUP_PRIME" && conf >= 60){
+    return "TAKE";
+  }
+
+  return "WAIT";
 }
 
 // ========= ANTI-SPAM =========
@@ -386,7 +402,7 @@ async function scanOnce(){
     await sleep(800);
   }
 
-  // Market noise check (BTC)
+  // Market noise check
   const btcRec = snapshots.find(r => r.symbol === "BTCUSDT_UMCBL");
   if (btcRec && isNoisyMarket(btcRec)){
     const ms = Date.now() - t0;
@@ -411,7 +427,7 @@ async function scanOnce(){
       setupState, fusion.direction, rsiCoherent, rec
     );
 
-    // On ne garde que les vrais trades "TAKE"
+    // 🔴 IMPORTANT : on ne garde QUE les TAKE
     if (reco === "TAKE"){
       candidates.push({
         symbol:     rec.symbol,
@@ -430,23 +446,16 @@ async function scanOnce(){
   }
 
   const ms = Date.now() - t0;
-  console.log(`[TOP30] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | ${candidates.length} SETUP`);
+  console.log(`[TOP30] SCAN — ${SYMBOLS.length} PAIRS | ${ms} MS | ${candidates.length} TAKE`);
 
   if (!candidates.length){
     return;
   }
 
-  const validCandidates = candidates.filter(c =>
+  const fresh = candidates.filter(c =>
     c.plan.entry !== null &&
     c.plan.sl    !== null &&
-    c.plan.tp1   !== null
-  );
-
-  if (!validCandidates.length){
-    return;
-  }
-
-  const fresh = validCandidates.filter(c =>
+    c.plan.tp1   !== null &&
     shouldSendFor(c.symbol, c.direction, c.reco)
   );
   if (!fresh.length) return;
@@ -470,8 +479,8 @@ async function scanOnce(){
 
 // ========= MAIN =========
 export async function startAutoselect(){
-  console.log("🔥 TOP 30 On (v0.8.9)");
-  await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
+  console.log("🔥 JTF TOP 30 On (v0.8.8)");
+  await sendTelegram("🟢 JTF TOP 30 v0.8.8 On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.log("[TOP30 ERROR]",e); }
