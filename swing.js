@@ -1,4 +1,4 @@
-// swing.js — JTF SWING v1.6 (API v2 + Stable + Data Logs)
+// swing.js — JTF SWING v1.7 (API v2 + Stable + Data Logs + Calibrated JDS)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -32,9 +32,9 @@ function logDebug(...args){
 // ========= CONFIG =========
 const SCAN_INTERVAL_MS = 30 * 60_000; // 30 minutes
 
-// Seuils "JDS swing"
-const JDS_READY = 75;
-const JDS_PRIME = 85;
+// Seuils "JDS swing" (calibrés sur la vraie échelle du score)
+const JDS_READY = 45;
+const JDS_PRIME = 55;
 
 // Limite de risque
 const MAX_ATR_1H   = 1.8;   // % max pour l'ATR 1h
@@ -367,6 +367,10 @@ async function scanOnce(){
 
   for (const rec of snaps){
     const jds = calculateJDSSwing(rec);
+
+    // 🔍 Log de calibration pour voir la distribution des scores
+    console.log(`[SWING JDS] ${rec.symbol} => ${jds.toFixed(1)}`);
+
     if (jds < JDS_READY) continue;      // on garde que READY+
 
     if (shouldAvoid(rec)) continue;     // trop violent → no swing
@@ -405,7 +409,7 @@ async function scanOnce(){
   // Top 3 setups max
   const chosen = source.sort((a,b)=>b.jds - a.jds).slice(0,3);
 
-  let msg = `🎯 *JTF SWING v1.6 — ${label}*\n\n`;
+  let msg = `🎯 *JTF SWING v1.7 — ${label}*\n\n`;
 
   chosen.forEach((s,idx)=>{
     if (!shouldSend(s.symbol, s.dir, label)) return;
@@ -428,8 +432,8 @@ async function scanOnce(){
 
 // ========= MAIN LOOP =========
 export async function startSwing(){
-  console.log("🔥 SWING v1.6 On");
-  await sendTelegram("🟢 SWING On");
+  console.log("🔥 SWING v1.7 On");
+  await sendTelegram("🟢 SWING v1.7 On");
   while(true){
     try{
       await scanOnce();
