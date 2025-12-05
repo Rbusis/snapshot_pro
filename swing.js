@@ -1,4 +1,4 @@
-// swing.js — JTF SWING v1.8 (API v2 + Stable + Data Logs + Leverage + Anti-Top Filter)
+// swing.js — JTF SWING v1.8 (API v2 + Stable + Data Logs + Leverage + Stricter Filters)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -32,11 +32,11 @@ function logDebug(...args){
 // ========= CONFIG =========
 const SCAN_INTERVAL_MS = 30 * 60_000; // 30 minutes
 
-// Seuils "JDS swing" (calibrés sur la vraie échelle du score)
-const JDS_READY = 45;
-const JDS_PRIME = 55;
+// Seuils "JDS swing" (plus stricts)
+const JDS_READY = 55;
+const JDS_PRIME = 65;
 
-// Limite de risque
+// Limites de risque
 const MAX_ATR_1H   = 1.8;   // % max pour l'ATR 1h
 const MAX_VOLA_24  = 25;    // % de range 24h max
 const MAX_VWAP_4H  = 4;     // écart max en % du VWAP 4h
@@ -162,6 +162,15 @@ function positionInDay(last,low,high){
   return ((last-low)/(high-low))*100;
 }
 
+// ========= LEVERAGE =========
+function getRecommendedLeverage(volaPct){
+  if (volaPct == null) return "3x";
+  if (volaPct <= 5)  return "4x";
+  if (volaPct <= 10) return "3x";
+  if (volaPct <= 18) return "2x";
+  return "1.5x";
+}
+
 // ========= PROCESS =========
 async function processSymbol(symbol){
   logDebug("processSymbol", symbol);
@@ -205,7 +214,6 @@ async function processSymbol(symbol){
       `[SWING DROP] ${symbol} — missing candles ` +
       `(15m=${c15.length},1h=${c1h.length},4h=${c4h.length})`
     );
-    return null;
   }
 
   await getDepth(symbol); // pas utilisé dans le score, mais prêt si on veut l'ajouter plus tard
@@ -308,44 +316,26 @@ function detectDirection(rec, jds){
   return "NEUTRAL";
 }
 
+// 🔒 Filtre pour éviter les swings trop extrêmes / FOMO
+function shouldAvoid(rec){
+  if (rec.atr1hPct != null && (rec.atr1hPct < 0.4 || rec.atr1hPct > MAX_ATR_1H)) return true;
+  if (rec.volaPct  != null && (rec.volaPct  < 4   || rec.volaPct  > MAX_VOLA_24)) return true;
+
+  if (rec.deltaVWAP1h != null && Math.abs(rec.deltaVWAP1h) > 2.5) return true;
+  if (rec.deltaVWAP4h != null && Math.abs(rec.deltaVWAP4h) > 5.0) return true;
+
+  // Eviter quand RSI 1h/4h est trop extrême → souvent fin de move
+  if (rec.rsi["1h"] != null && (rec.rsi["1h"] > 75 || rec.rsi["1h"] < 25)) return true;
+  if (rec.rsi["4h"] != null && (rec.rsi["4h"] > 72 || rec.rsi["4h"] < 28)) return true;
+
+  return false;
+}
+
 function isTimingGood(rec, dir){
   if (rec.rsi["15m"] == null) return false;
-  if (dir === "LONG")  return rec.rsi["15m"] > 55;
-  if (dir === "SHORT") return rec.rsi["15m"] < 45;
+  if (dir === "LONG")  return rec.rsi["15m"] > 58;
+  if (dir === "SHORT") return rec.rsi["15m"] < 42;
   return false;
-}
-
-function shouldAvoid(rec){
-  if (rec.atr1hPct != null && rec.atr1hPct > MAX_ATR_1H) return true;
-  if (rec.volaPct  != null && rec.volaPct  > MAX_VOLA_24) return true;
-  return false;
-}
-
-// 🔒 Filtre anti-top / anti-bottom (éviter d'entrer trop loin de la "fair value")
-function isOverextended(rec, dir){
-  const d1h = rec.deltaVWAP1h;
-  const r1h = rec.rsi["1h"];
-
-  if (dir === "LONG"){
-    if (d1h != null && d1h > 3) return true;     // prix > +3% au-dessus VWAP 1h
-    if (r1h != null && r1h > 70) return true;    // 1h en surachat
-  }
-  if (dir === "SHORT"){
-    if (d1h != null && d1h < -3) return true;    // prix < -3% sous VWAP 1h
-    if (r1h != null && r1h < 30) return true;    // 1h en survente extrême
-  }
-  return false;
-}
-
-// 📏 Levier dynamique en fonction de la vola 24h
-function getRecommendedLeverage(volaPct){
-  if (volaPct == null) return "3x";
-  const v = Math.abs(volaPct);
-
-  if (v < 3)  return "4x";
-  if (v < 6)  return "3x";
-  if (v < 10) return "2x";
-  return "1x";
 }
 
 // Plan swing basé sur ATR 1h (~RR 2)
@@ -395,22 +385,16 @@ async function scanOnce(){
   for (const rec of snaps){
     const jds = calculateJDSSwing(rec);
 
-    // 🔍 Log de calibration pour voir la distribution des scores
+    // Log de calibration
     console.log(`[SWING JDS] ${rec.symbol} => ${jds.toFixed(1)}`);
 
     if (jds < JDS_READY) continue;      // on garde que READY+
 
-    if (shouldAvoid(rec)) continue;     // trop violent → no swing
+    if (shouldAvoid(rec)) continue;     // trop extrême → pas un swing propre
 
     const dir = detectDirection(rec, jds);
     if (dir === "NEUTRAL") continue;
     if (!isTimingGood(rec, dir)) continue;
-
-    // ❌ Filtre anti-top / anti-bottom (évite d'acheter après le pump comme BNB/XRP/LTC)
-    if (isOverextended(rec, dir)){
-      console.log(`[SWING FILTER] ${rec.symbol} ${dir} — OVEREXTENDED (ΔVWAP1h / RSI1h)`);
-      continue;
-    }
 
     const plan = buildPlan(rec, dir);
     const lev  = getRecommendedLeverage(rec.volaPct);
@@ -426,7 +410,7 @@ async function scanOnce(){
       sl: plan.sl,
       tp: plan.tp,
       rr: plan.rr,
-      leverage: lev,
+      lev,
       rec
     });
   }
@@ -441,8 +425,8 @@ async function scanOnce(){
   const source = prime.length ? prime : setups;
   const label  = prime.length ? "PRIME" : "READY";
 
-  // Top 3 setups max
-  const chosen = source.sort((a,b)=>b.jds - a.jds).slice(0,3);
+  // ⚠️ On envoie maintenant uniquement le MEILLEUR setup
+  const chosen = source.sort((a,b)=>b.jds - a.jds).slice(0,1);
 
   let msg = `🎯 *JTF SWING v1.8 — ${label}*\n\n`;
 
@@ -455,7 +439,8 @@ async function scanOnce(){
     msg += `💠 Entry: ${s.entry}\n`;
     msg += `🛡️ SL: ${s.sl}\n`;
     msg += `🎯 TP: ${s.tp}\n`;
-    msg += `📏 Levier: ${s.leverage} — R:R ≈ ${s.rr.toFixed(1)}\n`;
+    msg += `📏 R:R ≈ ${s.rr.toFixed(1)}\n`;
+    msg += `⚖️ Levier conseillé: ${s.lev}\n`;
     msg += `🔥 JDS-SWING: ${s.jds}\n`;
     msg += `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}\n`;
     msg += `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%\n`;
