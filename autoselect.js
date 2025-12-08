@@ -1,4 +1,4 @@
-// top30.js — v0.8.8 (ex-AUTOSELECT) — JTF TOP 30 (Bitget USDT Perp)
+// autoselect.js — JTF TOP 30 v0.8.8 (Take-only + Max 3 per scan)
 
 import process from "process";
 import fetch from "node-fetch";
@@ -10,11 +10,12 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS    = 5 * 60_000;
 const MIN_ALERT_DELAY_MS  = 3 * 60_000;
+const MAX_SIGNALS_PER_SCAN = 3; // 👉 Nouveau : max 3 signaux par message
 
 // ========= DEBUG =========
 function logDebug(...args){
   if (DEBUG.global || DEBUG.autoselect){
-    console.log("[TOP30 DEBUG]", ...args);
+    console.log("[AUTOSELECT DEBUG]", ...args);
   }
 }
 
@@ -29,9 +30,8 @@ const SYMBOLS = [
 ];
 
 // ========= LIMITES =========
-// utilisées maintenant pour filtrer les trades
-const MAX_OI_FOR_SHORT_OK =  +0.6;  // SHORT autorisé seulement si ΔOI <= +0.6 %
-const MIN_OI_FOR_LONG_OK  =  -0.6;  // LONG autorisé seulement si ΔOI >= -0.6 %
+const MAX_OI_FOR_SHORT_OK =  0.6;
+const MIN_OI_FOR_LONG_OK  = -0.6;
 
 // ========= STATE =========
 const prevOI     = new Map();
@@ -196,6 +196,8 @@ async function processSymbol(symbol){
     return null;
   }
 
+  const closes15 = c15m.map(x=>x.c);
+
   const dP15 = closeChange(c15m);
 
   const volaPct = last!=null && high24!=null && low24!=null
@@ -242,7 +244,7 @@ function getSetupState(jds){
   return "SETUP_PRIME";
 }
 
-function isRSICoherent(){ return true; } // placeholder (RSI pas encore recalcé dans cette version)
+function isRSICoherent(){ return true; }
 
 function getOiImpulse(oi,vola){
   if(oi==null||vola==null) return {score:0,label:"neutre"};
@@ -270,7 +272,6 @@ function computeConfidence(rec,fusion,setupState,oiImpulse){
 }
 
 function estimateRR(vola){
-  if(vola == null) return 1.2;
   if(vola<2) return 1.4;
   if(vola<8) return 1.6;
   if(vola<15) return 1.4;
@@ -305,37 +306,16 @@ function buildTradePlan(rec,fusion,jds,rr){
   };
 }
 
-// ========= RECO (TAKE / WAIT / AVOID) =========
 function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoh,rec){
-  const vola = rec.volaPct;
-  const dOi  = rec.deltaOIpct;
+  // Ici, on garde un comportement simple : TAKE seulement si setup fort
+  if(setupState==="DEAD") return "AVOID";
+  if(setupState==="CHOP") return "WAIT";
+  if(setupState==="WATCH") return "WAIT";
+  if(conf<55) return "AVOID";
+  if(rr<1.2) return "AVOID";
+  if(jds<80) return "WAIT";          // 👉 TAKE seulement si JDS >= 80
 
-  // marché trop mou → AVOID
-  if (vola != null && vola < 2.0) return "AVOID";
-
-  // ΔVWAP doit être significatif, mais pas extrême
-  if (dVW == null || Math.abs(dVW) < 0.8 || Math.abs(dVW) > 3.0) return "AVOID";
-
-  // setupState minimal
-  if (setupState === "DEAD" || setupState === "CHOP") return "AVOID";
-  if (setupState === "WATCH" || setupState === "SETUP_EMERGENT") return "WAIT";
-
-  // à partir d’ici : SETUP_READY ou SETUP_PRIME
-  if (conf < 55) return "WAIT";
-  if (rr < 1.3)  return "WAIT";
-
-  // Filtre ΔOI directionnel (on utilise enfin les constantes)
-  if (dOi != null){
-    if (dir === "LONG"  && dOi < MIN_OI_FOR_LONG_OK)  return "WAIT"; // OI pas assez soutenu
-    if (dir === "SHORT" && dOi > MAX_OI_FOR_SHORT_OK) return "WAIT"; // OI pas assez purgé
-  }
-
-  // On ne TAKE que les setups PRIMES avec assez de confiance
-  if (setupState === "SETUP_PRIME" && conf >= 60){
-    return "TAKE";
-  }
-
-  return "WAIT";
+  return "TAKE";
 }
 
 // ========= ANTI-SPAM =========
@@ -427,7 +407,7 @@ async function scanOnce(){
       setupState, fusion.direction, rsiCoherent, rec
     );
 
-    // 🔴 IMPORTANT : on ne garde QUE les TAKE
+    // 👉 On ne garde QUE les vrais trades TAKE
     if (reco === "TAKE"){
       candidates.push({
         symbol:     rec.symbol,
@@ -452,16 +432,30 @@ async function scanOnce(){
     return;
   }
 
-  const fresh = candidates.filter(c =>
+  const validCandidates = candidates.filter(c =>
     c.plan.entry !== null &&
     c.plan.sl    !== null &&
-    c.plan.tp1   !== null &&
+    c.plan.tp1   !== null
+  );
+
+  if (!validCandidates.length){
+    return;
+  }
+
+  const fresh = validCandidates.filter(c =>
     shouldSendFor(c.symbol, c.direction, c.reco)
   );
   if (!fresh.length) return;
 
+  // 👉 Tri par JDS et limite à MAX_SIGNALS_PER_SCAN
+  const selected = fresh
+    .sort((a,b)=>b.jds - a.jds)
+    .slice(0, MAX_SIGNALS_PER_SCAN);
+
+  if (!selected.length) return;
+
   const lines = ["📊 *JTF TOP 30 — Signaux Confirmés*"];
-  fresh.forEach((c, idx) => {
+  selected.forEach((c, idx) => {
     const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
     const tpStr    = c.plan.tp2 ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
     lines.push("");
