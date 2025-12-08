@@ -1,4 +1,4 @@
-// degen.js — JTF DEGEN v3.3
+// degen.js — JTF DEGEN v3.4
 // API v2, 5m candles, filtres scalping, anti-top/bottom, registry anti-doublons
 
 import fetch from "node-fetch";
@@ -299,7 +299,7 @@ function analyzeCandidate(rec){
   if (score < 80) return null;
 
   // ======================
-  // Entry LIMIT, SL, TP
+  // Entry LIMIT, SL, TP, BE
   // ======================
   const decimals = rec.last < 1 ? 5 : 3;
   const gapPc    = gap / 100;
@@ -314,16 +314,34 @@ function analyzeCandidate(rec){
   // Risque scalping : 1.5–3.5 % max
   const riskPct = clamp(rec.volaPct / 8, 1.5, 3.5);
 
-  const sl = dir === "LONG"
+  let slRaw = dir === "LONG"
     ? entry * (1 - riskPct/100)
     : entry * (1 + riskPct/100);
 
   // TP plus proche : ~1.5–1.7 R
   const rr = gap <= 1.2 ? 1.5 : 1.7;
 
-  const tp = dir === "LONG"
+  let tpRaw = dir === "LONG"
     ? entry * (1 + (riskPct * rr)/100)
     : entry * (1 - (riskPct * rr)/100);
+
+  // ✅ Sécuriser l'ordre Entry / SL / TP
+  let sl = slRaw;
+  let tp = tpRaw;
+
+  if (dir === "LONG") {
+    if (sl >= entry) sl = entry * (1 - Math.abs(riskPct)/100);
+    if (tp <= entry) tp = entry * (1 + Math.abs(riskPct * rr)/100);
+  } else {
+    if (sl <= entry) sl = entry * (1 + Math.abs(riskPct)/100);
+    if (tp >= entry) tp = entry * (1 - Math.abs(riskPct * rr)/100);
+  }
+
+  // 🔒 Prix où on passe le SL à BE (1R)
+  const riskAbs = Math.abs(entry - sl);
+  const bePrice = dir === "LONG"
+    ? entry + riskAbs
+    : entry - riskAbs;
 
   const lev = riskPct > 2.8 ? "2x" : "3x";
 
@@ -340,6 +358,7 @@ function analyzeCandidate(rec){
     entry:num(entry,decimals),
     sl:num(sl,decimals),
     tp:num(tp,decimals),
+    bePrice:num(bePrice,decimals),
     rr
   };
 }
@@ -424,24 +443,24 @@ async function scanDegen(){
 
   console.log(`[DEGEN] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`);
 
-  const emoji = best.direction==="LONG" ? "🟢🔫" : "🔴🔫";
+  const emoji = best.direction==="LONG" ? "🚀" : "🪂";
 
   const msg =
-`🎯 *JTF DEGEN v3.3 (API v2, 5m)*
+`⚡ *JTF DEGEN v3.4* ⚡
 
 ${emoji} *${best.symbol}* — ${best.direction}
 🏅 Score: ${best.score}/100
 
+💰 Prix actuel: ${best.last}
+💠 Entry (limit): ${best.entry}
+🎯 TP: ${best.tp}
+🛑 SL: ${best.sl}
+🔒 SL → BE si prix atteint: ${best.bePrice}
+📏 R:R ≈ ${best.rr.toFixed(2)}
+
 📊 Vol Spike: x${num(best.volRatio,2)}
 🌡️ Vola24: ${num(best.volaPct,2)}%
 📉 ΔVWAP: ${num(best.priceVsVwap,2)}%
-
-💰 Prix spot: ${best.last}
-🏹 Entry LIMIT: ${best.entry}
-🛑 SL: ${best.sl}
-🎯 TP: ${best.tp}
-📏 R:R ≈ ${best.rr.toFixed(2)}
-
 ⚖️ Levier suggéré: ${best.levier}
 
 _Wait for limit — sniper mode._`;
@@ -453,8 +472,8 @@ _Wait for limit — sniper mode._`;
 
 // ========= START =========
 export async function startDegen(){
-  console.log("🔥 DEGEN v3.3 On (5m scalps)");
-  await sendTelegram("🟢 DEGEN v3.3 On");
+  console.log("🔥 DEGEN v3.4 On (5m scalps)");
+  await sendTelegram("🟢 DEGEN v3.4 On");
   while(true){
     try{ await scanDegen(); }
     catch(e){ console.log("[DEGEN ERROR]", e); }
