@@ -1,4 +1,4 @@
-// autoselect.js — JTF TOP 30 v0.8.8 (Take-only + Max 3 per scan)
+// autoselect.js — JTF TOP 30 v0.8.9 (Take-only + Max 3 per scan + BE level)
 
 import process from "process";
 import fetch from "node-fetch";
@@ -8,9 +8,10 @@ import { DEBUG } from "./debug.js";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID;
 
-const SCAN_INTERVAL_MS    = 5 * 60_000;
-const MIN_ALERT_DELAY_MS  = 3 * 60_000;
-const MAX_SIGNALS_PER_SCAN = 3; // 👉 Nouveau : max 3 signaux par message
+const SCAN_INTERVAL_MS     = 5 * 60_000;
+const MIN_ALERT_DELAY_MS   = 3 * 60_000;
+const MAX_SIGNALS_PER_SCAN = 3;      // max 3 signaux par message
+const SUGGESTED_LEVERAGE   = "4x";   // levier conseillé TOP30
 
 // ========= DEBUG =========
 function logDebug(...args){
@@ -196,8 +197,6 @@ async function processSymbol(symbol){
     return null;
   }
 
-  const closes15 = c15m.map(x=>x.c);
-
   const dP15 = closeChange(c15m);
 
   const volaPct = last!=null && high24!=null && low24!=null
@@ -278,42 +277,61 @@ function estimateRR(vola){
   return 1.2;
 }
 
+// ========= PLAN DE TRADE (avec BE) =========
 function buildTradePlan(rec,fusion,jds,rr){
-  const p=rec.last;
-  const dir=fusion.direction;
-  const decimals=p<0.01?6:p<0.1?5:4;
+  const p   = rec.last;              // prix actuel
+  const dir = fusion.direction;
+  const decimals = p<0.01?6:p<0.1?5:4;
 
-  const risk=clamp((rec.volaPct??5)/3,0.5,5);
-  const reward=risk*rr;
+  const riskPct   = clamp((rec.volaPct ?? 5)/3, 0.5, 5);
+  const rewardPct = riskPct * rr;
 
   let sl,tp1,tp2;
   if(dir==="LONG"){
-    sl  = p*(1-risk/100);
-    tp1 = p*(1+reward/100);
-    if(jds>=85) tp2=p*(1+(2.5*risk)/100);
+    sl  = p * (1 - riskPct   / 100);
+    tp1 = p * (1 + rewardPct / 100);
+    if(jds>=85) tp2 = p * (1 + (2.5 * riskPct) / 100);
   } else {
-    sl  = p*(1+risk/100);
-    tp1 = p*(1-reward/100);
-    if(jds>=85) tp2=p*(1-(2.5*risk)/100);
+    sl  = p * (1 + riskPct   / 100);
+    tp1 = p * (1 - rewardPct / 100);
+    if(jds>=85) tp2 = p * (1 - (2.5 * riskPct) / 100);
   }
 
+  // ✅ Sécuriser l'ordre des niveaux
+  if (dir === "LONG") {
+    sl  = Math.min(sl, p);
+    tp1 = Math.max(tp1, p);
+    if (tp2) tp2 = Math.max(tp2, tp1);
+  } else {
+    sl  = Math.max(sl, p);
+    tp1 = Math.min(tp1, p);
+    if (tp2) tp2 = Math.min(tp2, tp1);
+  }
+
+  // 🔒 Prix à partir duquel on passe le SL à BE (1R)
+  const riskAbs = Math.abs(p - sl);
+  const bePrice = dir === "LONG"
+    ? p + riskAbs
+    : p - riskAbs;
+
   return {
-    entry:num(p,decimals),
-    sl:num(sl,decimals),
-    tp1:num(tp1,decimals),
-    tp2:tp2?num(tp2,decimals):null,
+    entry:   num(p,decimals),
+    sl:      num(sl,decimals),
+    tp1:     num(tp1,decimals),
+    tp2:     tp2 ? num(tp2,decimals) : null,
+    bePrice: num(bePrice,decimals),
     rr
   };
 }
 
 function computeRecommendation(jds,conf,rr,oiImpulse,dVW,setupState,dir,rsiCoh,rec){
-  // Ici, on garde un comportement simple : TAKE seulement si setup fort
-  if(setupState==="DEAD") return "AVOID";
-  if(setupState==="CHOP") return "WAIT";
+  // TAKE seulement si setup fort
+  if(setupState==="DEAD")  return "AVOID";
+  if(setupState==="CHOP")  return "WAIT";
   if(setupState==="WATCH") return "WAIT";
-  if(conf<55) return "AVOID";
-  if(rr<1.2) return "AVOID";
-  if(jds<80) return "WAIT";          // 👉 TAKE seulement si JDS >= 80
+  if(conf<55)             return "AVOID";
+  if(rr<1.2)              return "AVOID";
+  if(jds<80)              return "WAIT";   // TAKE seulement si JDS >= 80
 
   return "TAKE";
 }
@@ -454,18 +472,24 @@ async function scanOnce(){
 
   if (!selected.length) return;
 
-  const lines = ["📊 *JTF TOP 30 — Signaux Confirmés*"];
+  const lines = ["⚡ *JTF TOP 30 v0.8.9* ⚡"];
+
   selected.forEach((c, idx) => {
     const dirEmoji = c.direction === "LONG" ? "📈" : "📉";
     const tpStr    = c.plan.tp2 ? `${c.plan.tp1} / ${c.plan.tp2}` : `${c.plan.tp1}`;
+
     lines.push("");
     lines.push(`*${idx + 1}) ${c.symbol}*`);
     lines.push(`${dirEmoji} *${c.direction}*`);
+    lines.push(`💰 Prix actuel: ${c.rec.last}`);
     lines.push(`💠 Entry: ${c.plan.entry}`);
-    lines.push(`🛡️ SL: ${c.plan.sl}`);
     lines.push(`🎯 TP: ${tpStr}`);
-    lines.push(`🔥 JDS: ${c.jds.toFixed(1)}`);
+    lines.push(`🛑 SL: ${c.plan.sl}`);
+    lines.push(`🔒 SL → BE si prix atteint: ${c.plan.bePrice}`);
+    lines.push(`📏 R:R ≈ ${c.rr.toFixed(1)}`);
+    lines.push(`🏅 JDS: ${c.jds.toFixed(1)}`);
     lines.push(`🔍 Confiance: ${c.confiance}%`);
+    lines.push(`⚖️ Levier suggéré: ${SUGGESTED_LEVERAGE}`);
   });
 
   await sendTelegram(lines.join("\n"));
@@ -473,8 +497,8 @@ async function scanOnce(){
 
 // ========= MAIN =========
 export async function startAutoselect(){
-  console.log("🔥 JTF TOP 30 On (v0.8.8)");
-  await sendTelegram("🟢 JTF TOP 30 v0.8.8 On");
+  console.log("🔥 JTF TOP 30 On (v0.8.9)");
+  await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
   while(true){
     try{ await scanOnce(); }
     catch(e){ console.log("[TOP30 ERROR]",e); }
