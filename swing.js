@@ -1,4 +1,4 @@
-// swing.js — JTF SWING v1.8 (API v2 + Stable + Data Logs + Leverage + Stricter Filters + BE level)
+// swing.js — JTF SWING v1.9 (Multi-session Swing, ATR4h, BE level, Leverage)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -32,14 +32,14 @@ function logDebug(...args){
 // ========= CONFIG =========
 const SCAN_INTERVAL_MS = 30 * 60_000; // 30 minutes
 
-// Seuils "JDS swing" (plus stricts)
+// Seuils "JDS swing" (plus stricts, pour peu de signaux mais plus robustes)
 const JDS_READY = 55;
 const JDS_PRIME = 65;
 
-// Limites de risque
+// Limites de risque globales
 const MAX_ATR_1H   = 1.8;   // % max pour l'ATR 1h
 const MAX_VOLA_24  = 25;    // % de range 24h max
-const MAX_VWAP_4H  = 4;     // écart max en % du VWAP 4h
+const MAX_VWAP_4H  = 4;     // écart max en % du VWAP 4h (pour le score)
 
 // ========= SYMBOLS (USDT-futures, API v2) =========
 const SYMBOLS = [
@@ -164,11 +164,10 @@ function positionInDay(last,low,high){
 
 // ========= LEVERAGE =========
 function getRecommendedLeverage(volaPct){
-  if (volaPct == null) return "3x";
-  if (volaPct <= 5)  return "4x";
-  if (volaPct <= 10) return "3x";
-  if (volaPct <= 18) return "2x";
-  return "1.5x";
+  if (volaPct == null) return "2x";
+  if (volaPct <= 5)  return "3x";
+  if (volaPct <= 10) return "2x";
+  return "1.5x"; // gros swing, on reste raisonnable
 }
 
 // ========= PROCESS =========
@@ -255,6 +254,7 @@ async function processSymbol(symbol){
   console.log(
     `[SWING DATA] ${symbol} | P=${last} | Vola24=${volaPctFixed!=null?volaPctFixed.toFixed(2):"n/a"}% | ` +
     `ATR1h=${atr1hPctFixed!=null?atr1hPctFixed.toFixed(2):"n/a"}% | ` +
+    `ATR4h=${atr4hPctFixed!=null?atr4hPctFixed.toFixed(2):"n/a"}% | ` +
     `ΔVWAP1h=${deltaVWAP1h!=null?deltaVWAP1h.toFixed(3):"n/a"} | ` +
     `ΔVWAP4h=${deltaVWAP4h!=null?deltaVWAP4h.toFixed(3):"n/a"} | ` +
     `ΔOI=${deltaOIpct!=null?deltaOIpct.toFixed(3):"n/a"} | ` +
@@ -284,7 +284,7 @@ async function processSymbol(symbol){
 function calculateJDSSwing(rec){
   let score = 0;
 
-  // RSI 15m extrêmes → énergie de swing
+  // RSI 15m extrêmes → énergie de swing (départ de move)
   if (rec.rsi["15m"] != null){
     if (rec.rsi["15m"] > 60) score += 12;
     if (rec.rsi["15m"] < 40) score += 12;
@@ -299,12 +299,18 @@ function calculateJDSSwing(rec){
     if (rec.deltaOIpct < -1) score += 8;
   }
 
-  // ATR / Vola raisonnables
+  // ATR / Vola raisonnables (on évite les barres full casino)
   if (rec.atr1hPct != null && rec.atr1hPct < MAX_ATR_1H)  score += 12;
   if (rec.volaPct  != null && rec.volaPct  < MAX_VOLA_24) score += 12;
 
   // Prix pas trop loin du VWAP 4h (swing macro cohérent)
-  if (rec.deltaVWAP4h != null && Math.abs(rec.deltaVWAP4h) < MAX_VWAP_4H) score += 10;
+  if (rec.deltaVWAP4h != null && Math.abs(rec.deltaVWAP4h) < MAX_VWAP_4H) score += 12;
+
+  // Bonus si RSI 4h est dans une zone "tendancielle saine"
+  if (rec.rsi["4h"] != null){
+    if (rec.rsi["4h"] > 50 && rec.rsi["4h"] < 70) score += 6;   // tendance haussière propre
+    if (rec.rsi["4h"] < 50 && rec.rsi["4h"] > 30) score += 6;   // tendance baissière propre
+  }
 
   return score;
 }
@@ -339,38 +345,40 @@ function isTimingGood(rec, dir){
   return false;
 }
 
-// Plan swing basé sur ATR 1h (~RR 2) + BE level
+// Plan swing basé sur ATR 4h (vrai multi-sessions, RR ~ 2.5)
 function buildPlan(rec, dir){
-  const decimals = rec.last < 1 ? 5 : 3;
-  const entry   = rec.last;
-  const atrPerc = rec.atr1hPct != null ? rec.atr1hPct : 0.4; // fallback 0.4%
-  const atrAbs  = entry * (atrPerc / 100);
+  const entry = rec.last;
 
-  let slRaw = dir === "LONG" ? entry - atrAbs : entry + atrAbs;
-  let tpRaw = dir === "LONG" ? entry + atrAbs*2 : entry - atrAbs*2;
+  // baseRisk en % : ATR4h prioritaire, sinon ATR1h * 1.5, sinon fallback 3%
+  let baseRiskPct = rec.atr4hPct != null
+    ? rec.atr4hPct
+    : (rec.atr1hPct != null ? rec.atr1hPct * 1.5 : 3);
 
-  // Sécurité : garantir l'ordre SL / Entry / TP
-  let sl = slRaw;
-  let tp = tpRaw;
+  const riskPct = clamp(baseRiskPct, 3, 8);  // swing multi-sessions 3–8%
 
-  if (dir === "LONG"){
-    if (sl >= entry) sl = entry - Math.abs(atrAbs);
-    if (tp <= entry) tp = entry + Math.abs(2*atrAbs);
-  } else {
-    if (sl <= entry) sl = entry + Math.abs(atrAbs);
-    if (tp >= entry) tp = entry - Math.abs(2*atrAbs);
-  }
+  const sl = dir === "LONG"
+    ? entry * (1 - riskPct/100)
+    : entry * (1 + riskPct/100);
 
-  // 🔒 Niveau où on passe le SL à BE (1R)
-  const riskAbs  = Math.abs(entry - sl);
-  const bePrice  = dir === "LONG" ? entry + riskAbs : entry - riskAbs;
+  const rr = 2.5; // objectif global de swing
+
+  const tp = dir === "LONG"
+    ? entry * (1 + (riskPct * rr)/100)
+    : entry * (1 - (riskPct * rr)/100);
+
+  // Niveau où on passe le SL à BE : +1R en notre faveur
+  const absRisk = Math.abs(entry - sl);
+  const beTrigger = dir === "LONG"
+    ? entry + absRisk
+    : entry - absRisk;
 
   return {
-    entry:   num(entry,decimals),
-    sl:      num(sl,decimals),
-    tp:      num(tp,decimals),
-    bePrice: num(bePrice,decimals),
-    rr:      2.0
+    entry:     num(entry,4),
+    sl:        num(sl,4),
+    tp:        num(tp,4),
+    rr,
+    riskPct:   +num(riskPct,2),
+    beTrigger: num(beTrigger,4)
   };
 }
 
@@ -425,11 +433,7 @@ async function scanOnce(){
       dir,
       jds: +num(jds,1),
       state,
-      entry:   plan.entry,
-      sl:      plan.sl,
-      tp:      plan.tp,
-      bePrice: plan.bePrice,
-      rr:      plan.rr,
+      plan,
       lev,
       rec
     });
@@ -445,43 +449,40 @@ async function scanOnce(){
   const source = prime.length ? prime : setups;
   const label  = prime.length ? "PRIME" : "READY";
 
-  // 👉 On envoie uniquement le MEILLEUR setup
+  // ⚠️ On envoie maintenant uniquement le MEILLEUR setup
   const chosen = source.sort((a,b)=>b.jds - a.jds).slice(0,1);
 
-  const blocks = [];
+  let msg = `🎯 *JTF SWING v1.9 — ${label}*\n\n`;
+  let hasContent = false;
 
   chosen.forEach((s,idx)=>{
     if (!shouldSend(s.symbol, s.dir, label)) return;
     const emoji = s.dir === "LONG" ? "📈" : "📉";
 
-    blocks.push(
-      `⚡ JTF SWING v1.8 — ${label} ⚡\n`,
-      `${emoji} ${s.symbol} — ${s.dir}`,
-      `🏅 JDS-SWING: ${s.jds}`,
-      ``,
-      `💰 Prix actuel: ${s.entry}`,         // swing = entry ≈ prix spot
-      `💠 Entry: ${s.entry}`,
-      `🎯 TP: ${s.tp}`,
-      `🛑 SL: ${s.sl}`,
-      `🔒 SL → BE si prix atteint: ${s.bePrice}`,
-      `⚖️ Levier conseillé: ${s.lev}`,
-      ``,
-      `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}`,
-      `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%`,
-      `📉 ΔOI: ${s.rec.deltaOIpct}% | ATR1h: ${s.rec.atr1hPct}%`
-    );
+    msg += `*${s.symbol}* — ${emoji} *${s.dir}*\n\n`;
+    msg += `💰 Prix spot: ${num(s.rec.last,4)}\n`;
+    msg += `💠 Entry (swing): ${s.plan.entry}\n`;
+    msg += `🛑 SL: ${s.plan.sl}\n`;
+    msg += `🎯 TP: ${s.plan.tp}\n`;
+    msg += `📏 R:R ≈ ${s.plan.rr.toFixed(2)}  (risque ≈ ${s.plan.riskPct}%)\n`;
+    msg += `⚖️ Levier conseillé: ${s.lev}\n`;
+    msg += `🔁 SL → BE si prix atteint: ${s.plan.beTrigger}\n\n`;
+    msg += `🔥 JDS-SWING: ${s.jds}\n`;
+    msg += `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}\n`;
+    msg += `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%\n`;
+    msg += `📉 ΔOI: ${s.rec.deltaOIpct}% | ATR1h: ${s.rec.atr1hPct}% | ATR4h: ${s.rec.atr4hPct}%\n`;
+    hasContent = true;
   });
 
-  if (!blocks.length) return;
+  if (!hasContent) return;
 
-  const msg = blocks.join("\n");
   await sendTelegram(msg);
 }
 
 // ========= MAIN LOOP =========
 export async function startSwing(){
-  console.log("🔥 SWING v1.8 On");
-  await sendTelegram("🟢 SWING v1.8 On");
+  console.log("🔥 SWING v1.9 On (multi-session)");
+  await sendTelegram("🟢 JTF SWING v1.9 On (multi-session swing)");
   while(true){
     try{
       await scanOnce();
