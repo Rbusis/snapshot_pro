@@ -253,15 +253,37 @@ function analyze(rec){
     ? rec.last*(1-gapPc*0.25)
     : rec.last*(1+gapPc*0.25);
 
+  // Risque relatif à la vola (2–5%)
   const riskPct = clamp((rec.volaPct/5)*2,2,5);
 
-  const sl = dir==="LONG"
-    ? rec.last*(1-riskPct/100)
-    : rec.last*(1+riskPct/100);
+  // SL & TP basés sur l'ENTRY (et pas le prix spot)
+  let slRaw = dir==="LONG"
+    ? entry*(1-riskPct/100)
+    : entry*(1+riskPct/100);
 
-  const tp = dir==="LONG"
-    ? rec.last*(1+(riskPct*2)/100)
-    : rec.last*(1-(riskPct*2)/100);
+  const rr = 2.0; // ~RR 2 pour Discovery
+
+  let tpRaw = dir==="LONG"
+    ? entry*(1+(riskPct*rr)/100)
+    : entry*(1-(riskPct*rr)/100);
+
+  // ✅ Sécuriser l'ordre Entry / SL / TP
+  let sl = slRaw;
+  let tp = tpRaw;
+
+  if (dir === "LONG") {
+    if (sl >= entry) sl = entry * (1 - Math.abs(riskPct)/100);
+    if (tp <= entry) tp = entry * (1 + Math.abs(riskPct*rr)/100);
+  } else {
+    if (sl <= entry) sl = entry * (1 + Math.abs(riskPct)/100);
+    if (tp >= entry) tp = entry * (1 - Math.abs(riskPct*rr)/100);
+  }
+
+  // 🔒 Prix où on passe le SL à BE (1R)
+  const riskAbs = Math.abs(entry - sl);
+  const bePrice = dir === "LONG"
+    ? entry + riskAbs
+    : entry - riskAbs;
 
   const lev = riskPct>4 ? "2x" : "3x";
 
@@ -269,10 +291,11 @@ function analyze(rec){
     symbol:rec.symbol,
     direction:dir,
     score,
-    price:rec.last,
+    price:num(rec.last,decimals),          // prix actuel formaté
     limitEntry:num(entry,decimals),
     sl:num(sl,decimals),
     tp:num(tp,decimals),
+    bePrice:num(bePrice,decimals),
     volRatio:num(rec.volRatio,1),
     vola:num(rec.volaPct,1),
     obRatio: rec.asksVol>0 ? (rec.bidsVol/rec.asksVol).toFixed(2) : "N/A",
@@ -375,19 +398,21 @@ async function scanDiscovery(){
   const emoji = best.direction==="LONG" ? "🚀" : "🪂";
 
   const msg =
-`⚡ *JTF DISCOVERY v1.9* ⚡
+`⚡ JTF DISCOVERY v1.9 ⚡
 
-${emoji} *${best.symbol}* — ${best.direction}
+${emoji} ${best.symbol} — ${best.direction}
 🏅 Score: ${best.score}
 
+💰 Prix actuel: ${best.price}
 💠 Entry (limit): ${best.limitEntry}
 🎯 TP: ${best.tp}
 🛑 SL: ${best.sl}
+🔒 SL → BE si prix atteint: ${best.bePrice}
+⚖️ Levier suggéré: ${best.levier}
 
 📊 Vol Spike: x${best.volRatio}
 🌡️ Vola24: ${best.vola}%
-📘 Orderbook: ${best.obRatio}
-⚖️ Levier suggéré: ${best.levier}`;
+📘 Orderbook: ${best.obRatio}`;
 
   await sendTelegram(msg);
   lastGlobalTradeTime = now;
