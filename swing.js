@@ -1,4 +1,4 @@
-// swing.js — JTF SWING v1.8 (API v2 + Stable + Data Logs + Leverage + Stricter Filters)
+// swing.js — JTF SWING v1.8 (API v2 + Stable + Data Logs + Leverage + Stricter Filters + BE level)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
@@ -214,6 +214,7 @@ async function processSymbol(symbol){
       `[SWING DROP] ${symbol} — missing candles ` +
       `(15m=${c15.length},1h=${c1h.length},4h=${c4h.length})`
     );
+    return null;
   }
 
   await getDepth(symbol); // pas utilisé dans le score, mais prêt si on veut l'ajouter plus tard
@@ -338,20 +339,38 @@ function isTimingGood(rec, dir){
   return false;
 }
 
-// Plan swing basé sur ATR 1h (~RR 2)
+// Plan swing basé sur ATR 1h (~RR 2) + BE level
 function buildPlan(rec, dir){
+  const decimals = rec.last < 1 ? 5 : 3;
   const entry   = rec.last;
   const atrPerc = rec.atr1hPct != null ? rec.atr1hPct : 0.4; // fallback 0.4%
   const atrAbs  = entry * (atrPerc / 100);
 
-  const sl = dir === "LONG" ? entry - atrAbs : entry + atrAbs;
-  const tp = dir === "LONG" ? entry + atrAbs*2 : entry - atrAbs*2;
+  let slRaw = dir === "LONG" ? entry - atrAbs : entry + atrAbs;
+  let tpRaw = dir === "LONG" ? entry + atrAbs*2 : entry - atrAbs*2;
+
+  // Sécurité : garantir l'ordre SL / Entry / TP
+  let sl = slRaw;
+  let tp = tpRaw;
+
+  if (dir === "LONG"){
+    if (sl >= entry) sl = entry - Math.abs(atrAbs);
+    if (tp <= entry) tp = entry + Math.abs(2*atrAbs);
+  } else {
+    if (sl <= entry) sl = entry + Math.abs(atrAbs);
+    if (tp >= entry) tp = entry - Math.abs(2*atrAbs);
+  }
+
+  // 🔒 Niveau où on passe le SL à BE (1R)
+  const riskAbs  = Math.abs(entry - sl);
+  const bePrice  = dir === "LONG" ? entry + riskAbs : entry - riskAbs;
 
   return {
-    entry: num(entry,4),
-    sl:    num(sl,4),
-    tp:    num(tp,4),
-    rr:    2.0
+    entry:   num(entry,decimals),
+    sl:      num(sl,decimals),
+    tp:      num(tp,decimals),
+    bePrice: num(bePrice,decimals),
+    rr:      2.0
   };
 }
 
@@ -406,10 +425,11 @@ async function scanOnce(){
       dir,
       jds: +num(jds,1),
       state,
-      entry: plan.entry,
-      sl: plan.sl,
-      tp: plan.tp,
-      rr: plan.rr,
+      entry:   plan.entry,
+      sl:      plan.sl,
+      tp:      plan.tp,
+      bePrice: plan.bePrice,
+      rr:      plan.rr,
       lev,
       rec
     });
@@ -425,28 +445,36 @@ async function scanOnce(){
   const source = prime.length ? prime : setups;
   const label  = prime.length ? "PRIME" : "READY";
 
-  // ⚠️ On envoie maintenant uniquement le MEILLEUR setup
+  // 👉 On envoie uniquement le MEILLEUR setup
   const chosen = source.sort((a,b)=>b.jds - a.jds).slice(0,1);
 
-  let msg = `🎯 *JTF SWING v1.8 — ${label}*\n\n`;
+  const blocks = [];
 
   chosen.forEach((s,idx)=>{
     if (!shouldSend(s.symbol, s.dir, label)) return;
     const emoji = s.dir === "LONG" ? "📈" : "📉";
 
-    msg += `*${idx+1}) ${s.symbol}*\n`;
-    msg += `${emoji} *${s.dir}*\n`;
-    msg += `💠 Entry: ${s.entry}\n`;
-    msg += `🛡️ SL: ${s.sl}\n`;
-    msg += `🎯 TP: ${s.tp}\n`;
-    msg += `📏 R:R ≈ ${s.rr.toFixed(1)}\n`;
-    msg += `⚖️ Levier conseillé: ${s.lev}\n`;
-    msg += `🔥 JDS-SWING: ${s.jds}\n`;
-    msg += `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}\n`;
-    msg += `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%\n`;
-    msg += `📉 ΔOI: ${s.rec.deltaOIpct}% | ATR1h: ${s.rec.atr1hPct}%\n\n`;
+    blocks.push(
+      `⚡ JTF SWING v1.8 — ${label} ⚡\n`,
+      `${emoji} ${s.symbol} — ${s.dir}`,
+      `🏅 JDS-SWING: ${s.jds}`,
+      ``,
+      `💰 Prix actuel: ${s.entry}`,         // swing = entry ≈ prix spot
+      `💠 Entry: ${s.entry}`,
+      `🎯 TP: ${s.tp}`,
+      `🛑 SL: ${s.sl}`,
+      `🔒 SL → BE si prix atteint: ${s.bePrice}`,
+      `⚖️ Levier conseillé: ${s.lev}`,
+      ``,
+      `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}`,
+      `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%`,
+      `📉 ΔOI: ${s.rec.deltaOIpct}% | ATR1h: ${s.rec.atr1hPct}%`
+    );
   });
 
+  if (!blocks.length) return;
+
+  const msg = blocks.join("\n");
   await sendTelegram(msg);
 }
 
