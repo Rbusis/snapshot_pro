@@ -46,6 +46,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
 const num   = (v,d=4)=>v==null?null:+(+v).toFixed(d);
 
+// Gestion décimales pour tous les prix (incl. micro-caps type PEPE)
+function getPriceDecimals(price){
+  if (price == null || !isFinite(price)) return 4;
+
+  const p = Math.abs(price);
+
+  if (p >= 100)   return 2;
+  if (p >= 1)     return 4;
+  if (p >= 0.1)   return 5;
+  if (p >= 0.01)  return 6;
+  if (p >= 0.001) return 7;
+  return 8; // micro-prix (PEPE & co)
+}
+
 async function safeGetJson(url){
   try{
     const r = await fetch(url,{headers:{Accept:"application/json"}});
@@ -245,7 +259,8 @@ function analyze(rec){
 
   if(score<78) return null;
 
-  const decimals = rec.last<1?5:3;
+  // 🔢 Décimales adaptées au niveau de prix (micro-caps inclus)
+  const decimals = getPriceDecimals(rec.last);
   const gapPc = gap/100;
 
   // Limit order (retrace contrôlé)
