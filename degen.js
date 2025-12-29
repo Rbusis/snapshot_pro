@@ -257,8 +257,17 @@ function analyzeCandidate(rec) {
   if (rec.volaPct == null || rec.volaPct < 5 || rec.volaPct > 40) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  // Gap vs VWAP : pas trop petit, pas trop extrême
-  if (gap < 0.8 || gap > 2.8) return null;
+
+  // 🎯 Gap asymétrique : LONG plus conservateur
+  let gapMin, gapMax;
+  if (rec.priceVsVwap > 0) {  // LONG
+    gapMin = 0.6;
+    gapMax = 2.2;  // Éviter trop d'extension (était 2.8)
+  } else {  // SHORT
+    gapMin = 0.8;
+    gapMax = 2.8;  // SHORT ok avec plus d'extension
+  }
+  if (gap < gapMin || gap > gapMax) return null;
 
   let dir = null;
 
@@ -278,8 +287,8 @@ function analyzeCandidate(rec) {
     return null;
   }
 
-  // Anti-top / anti-bottom : éviter le sommet/bas du spike
-  if (dir === "LONG" && rec.rsi5 != null && rec.rsi5 > 80 && gap > 2.3) {
+  // 🎯 Anti-top/bottom : plus tolérant pour LONG (était RSI > 80)
+  if (dir === "LONG" && rec.rsi5 != null && rec.rsi5 > 85 && gap > 2.5) {
     return null;
   }
   if (dir === "SHORT" && rec.rsi5 != null && rec.rsi5 < 20 && gap > 2.3) {
@@ -488,13 +497,4 @@ _Wait for limit — sniper mode._`;
   lastGlobalTradeTime = now;
 }
 
-// ========= START =========
-export async function startDegen() {
-  console.log("🔥 DEGEN v3.4 On (5m scalps)");
-  await sendTelegram("🟢 DEGEN v3.4 On");
-  while (true) {
-    try { await scanDegen(); }
-    catch (e) { console.log("[DEGEN ERROR]", e); }
-    await sleep(SCAN_INTERVAL_MS);
-  }
-}
+/
