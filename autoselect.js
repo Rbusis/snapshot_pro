@@ -242,7 +242,13 @@ async function processSymbol(symbol) {
 
 // ====== JDS Engine (raccourci) ======
 function fuseJDS(rec) {
-  if (rec.MMS_short > rec.MMS_long) return { direction: "SHORT", jds: rec.MMS_short };
+  // 🎯 Bias asymétrique : SHORT preferred (Phase 1: SHORT -0.56 vs LONG -6.21)
+  const mms_short_adjusted = rec.MMS_short + 10;  // Bonus SHORT
+  const mms_long_adjusted = rec.MMS_long - 5;    // Malus LONG
+
+  if (mms_short_adjusted > mms_long_adjusted) {
+    return { direction: "SHORT", jds: rec.MMS_short };
+  }
   return { direction: "LONG", jds: rec.MMS_long };
 }
 
@@ -517,10 +523,4 @@ async function scanOnce() {
 // ========= MAIN =========
 export async function startAutoselect() {
   console.log("🔥 JTF TOP 30 On (v0.8.9)");
-  await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
-  while (true) {
-    try { await scanOnce(); }
-    catch (e) { console.log("[TOP30 ERROR]", e); }
-    await sleep(SCAN_INTERVAL_MS);
-  }
-}
+ 
