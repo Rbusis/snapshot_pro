@@ -497,4 +497,15 @@ _Wait for limit — sniper mode._`;
   lastGlobalTradeTime = now;
 }
 
-/
+export async function startDegen() {
+  console.log("🔥 DEGEN v3.4 On");
+  await sendTelegram("🟢 DEGEN v3.4 On");
+  while (true) {
+    try {
+      await scanDegen();
+    } catch (e) {
+      console.log("[DEGEN ERROR]", e);
+    }
+    await sleep(SCAN_INTERVAL_MS);
+  }
+}
