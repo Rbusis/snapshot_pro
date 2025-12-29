@@ -523,4 +523,14 @@ async function scanOnce() {
 // ========= MAIN =========
 export async function startAutoselect() {
   console.log("🔥 JTF TOP 30 On (v0.8.9)");
+    await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
+  while (true) {
+    try {
+      await scanOnce();
+    } catch (e) {
+      console.error("[TOP30 ERROR]", e);
+    }
+    await sleep(SCAN_INTERVAL_MS);
+  }
+}
  
