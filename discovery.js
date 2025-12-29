@@ -244,13 +244,22 @@ function analyze(rec) {
   if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 22) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  // Gap vs VWAP : fenêtre "judicieuse"
-  if (gap < 0.6 || gap > 3.2) return null;
+
+  // 🎯 Gap asymétrique : LONG plus conservateur (évite extensions)
+  let gapMin, gapMax;
+  if (rec.priceVsVwap > 0) {  // LONG
+    gapMin = 0.3;  // Accepter gaps plus petits
+    gapMax = 1.8;  // Éviter extensions (était 3.2)
+  } else {  // SHORT
+    gapMin = 0.6;
+    gapMax = 3.2;  // SHORT ok avec extensions
+  }
+  if (gap < gapMin || gap > gapMax) return null;
 
   let dir = null;
 
   if (rec.priceVsVwap > 0) {
-    if (rec.wicks.upper > 1.2) return null;
+    if (rec.wicks.upper > 2.0) return null;  // Plus tolérant (était 1.2)
     if (rec.obScore < 0) return null;
     dir = "LONG";
   } else {
@@ -259,21 +268,27 @@ function analyze(rec) {
     dir = "SHORT";
   }
 
-  // 🎯 Apply directional bias filter (LONG are toxic for DISCOVERY)
-  if (shouldSkipDirection(dir)) {
-    console.log(`[DISCOVERY SKIP] ${rec.symbol} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
-    return null;
+  // 🎯 Momentum filter for LONG (évite achats en dump)
+  if (dir === "LONG") {
+    if (rec.change24 < -2) return null;  // Skip si dump fort 24h
   }
 
   let score = 0;
   score += rec.volRatio >= 3 ? 30 : 15;
   score += (gap >= 1 && gap <= 2.2) ? 20 : 10;
+
+  // 🎯 RSI asymétrique : LONG entre plus tôt (45-65 vs 55-75)
   score += (dir === "LONG"
-    ? (rec.rsi5 >= 55 && rec.rsi5 <= 75 ? 15 : 5)
+    ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 15 : 5)  // Optimisé pour LONG
     : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 15 : 5)
   );
   if ((dir === "LONG" && rec.obScore === 1) || (dir === "SHORT" && rec.obScore === -1)) score += 15;
-  if ((dir === "LONG" && rec.change24 > 0) || (dir === "SHORT" && rec.change24 < 0)) score += 10;
+
+  // 🎯 Scoring asymétrique : LONG bonus fort si pump
+  if (dir === "LONG" && rec.change24 > 0) {
+    score += rec.change24 > 5 ? 20 : 10;  // Bonus plus gros si fort pump
+  }
+  if (dir === "SHORT" && rec.change24 < 0) score += 10;
 
   if (score < 78) return null;
 
