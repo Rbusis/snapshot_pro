@@ -438,7 +438,7 @@ async function scanOnce() {
 
     // 🎯 Apply directional bias filter (CRITICAL: SHORT are toxic for SWING)
     if (shouldSkipDirection(dir)) {
-      console.log(`[SWING SKIP] ${sym} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
+      console.log(`[SWING SKIP] ${rec.symbol} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
       continue;
     }
     if (!isTimingGood(rec, dir)) continue;
