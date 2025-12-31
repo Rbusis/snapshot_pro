@@ -97,6 +97,29 @@ async function getAllTickers() {
   return j?.data ?? [];
 }
 
+// ========= MARKET CONTEXT =========
+async function getFearAndGreed() {
+  const j = await safeGetJson("https://api.alternative.me/fng/");
+  return j?.data?.[0]?.value ? parseInt(j.data[0].value) : null;
+}
+
+async function getBTCTrend() {
+  const tk = await getTicker("BTCUSDT");
+  if (!tk) return null;
+  const last = tk.lastPr ?? tk.markPrice ?? tk.close;
+
+  // Simple structure check: price vs 1h candles
+  const c1h = await getCandles("BTCUSDT", 3600, 24);
+  if (!c1h?.length) return null;
+
+  const vwp = vwap(c1h);
+  return {
+    price: last,
+    vwp: vwp,
+    isBullish: last > vwp
+  };
+}
+
 // ========= INDICATORS =========
 function rsi(values, p = 14) {
   if (!values || values.length < p + 1) return null;
@@ -250,8 +273,11 @@ async function processDegen(symbol) {
 function analyzeCandidate(rec) {
   if (!rec) return null;
 
-  // Vol spike un peu plus exigeant
-  if (rec.volRatio < 2.5) return null;
+  let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
+
+  // Vol spike exigence asymétrique (+20% pour LONG)
+  const volMin = dir === "LONG" ? 3.0 : 2.5;
+  if (rec.volRatio < volMin) return null;
 
   // Volatilité : éviter le mort et le full casino
   if (rec.volaPct == null || rec.volaPct < 5 || rec.volaPct > 40) return null;
@@ -260,31 +286,39 @@ function analyzeCandidate(rec) {
 
   // 🎯 Gap asymétrique : LONG plus conservateur
   let gapMin, gapMax;
-  if (rec.priceVsVwap > 0) {  // LONG
+  if (dir === "LONG") {
     gapMin = 0.6;
     gapMax = 2.2;  // Éviter trop d'extension (était 2.8)
-  } else {  // SHORT
+  } else {
     gapMin = 0.8;
     gapMax = 2.8;  // SHORT ok avec plus d'extension
   }
   if (gap < gapMin || gap > gapMax) return null;
 
-  let dir = null;
-
-  if (rec.priceVsVwap > 0) {
+  if (dir === "LONG") {
     if (rec.wicks.upper > 1.3) return null;
     if (rec.obScore < 0) return null;
-    dir = "LONG";
   } else {
     if (rec.wicks.lower > 1.3) return null;
     if (rec.obScore > 0) return null;
-    dir = "SHORT";
   }
 
   // 🎯 Apply directional bias filter (soft mode: just log, don't skip)
   if (shouldSkipDirection(dir)) {
     console.log(`[DEGEN SKIP] ${rec.symbol} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
     return null;
+  }
+
+  // 🎯 NEW: Market Sentiment & BTC Filters for LONG
+  if (dir === "LONG") {
+    if (rec.mktContext?.fng != null && rec.mktContext.fng < 25) {
+      console.log(`[DEGEN SKIP] ${rec.symbol} — LONG blocked by Extreme Fear (${rec.mktContext.fng})`);
+      return null;
+    }
+    if (rec.mktContext?.btc && !rec.mktContext.btc.isBullish) {
+      console.log(`[DEGEN SKIP] ${rec.symbol} — LONG blocked by Bearish BTC Trend`);
+      return null;
+    }
   }
 
   // 🎯 Anti-top/bottom : plus tolérant pour LONG (était RSI > 80)
@@ -324,6 +358,9 @@ function analyzeCandidate(rec) {
   if (gap > 2.4) score -= 6;
 
   if (score < 80) return null;
+
+  // 🎯 Scoring bonus asymétrique : LONG bonus restreint
+  if (dir === "LONG" && rec.mktContext?.fng > 60) score += 10;
 
   // ======================
   // Entry LIMIT, SL, TP, BE
@@ -385,6 +422,7 @@ function analyzeCandidate(rec) {
     entry: num(entry, decimals),
     sl: num(sl, decimals),
     tp: num(tp, decimals),
+    partialTP: num(bePrice, decimals), // TP 1 at 1R
     bePrice: num(bePrice, decimals),
     rr
   };
@@ -428,6 +466,11 @@ async function scanDegen() {
     lastSymbolUpdate = now;
   }
 
+  // Get Market Context
+  const [fng, btc] = await Promise.all([getFearAndGreed(), getBTCTrend()]);
+  const mktContext = { fng, btc };
+  console.log(`[DEGEN MARKET] F&G: ${fng} | BTC Bullish: ${btc?.isBullish}`);
+
   const BATCH = 5;
   const candidates = [];
 
@@ -436,6 +479,7 @@ async function scanDegen() {
     const results = await Promise.all(batch.map(s => processDegen(s)));
 
     for (const r of results) {
+      if (r) r.mktContext = mktContext;
       const s = analyzeCandidate(r);
       if (s) candidates.push(s);
     }
@@ -480,9 +524,10 @@ ${emoji} *${best.symbol}* — ${best.direction}
 
 💰 Prix actuel: ${best.last}
 💠 Entry (limit): ${best.entry}
-🎯 TP: ${best.tp}
+🎁 TP Partiel (50%): ${best.partialTP} (1R)
+🎯 TP Final: ${best.tp}
 🛑 SL: ${best.sl}
-🔒 SL → BE si prix atteint: ${best.bePrice}
+🔒 Sécurisation (SL → BE) @ ${best.bePrice}
 📏 R:R ≈ ${best.rr.toFixed(2)}
 
 📊 Vol Spike: x${num(best.volRatio, 2)}
@@ -497,15 +542,13 @@ _Wait for limit — sniper mode._`;
   lastGlobalTradeTime = now;
 }
 
+// ========= START =========
 export async function startDegen() {
-  console.log("🔥 DEGEN v3.4 On");
+  console.log("🔥 DEGEN v3.4 On (5m scalps)");
   await sendTelegram("🟢 DEGEN v3.4 On");
   while (true) {
-    try {
-      await scanDegen();
-    } catch (e) {
-      console.log("[DEGEN ERROR]", e);
-    }
+    try { await scanDegen(); }
+    catch (e) { console.log("[DEGEN ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
