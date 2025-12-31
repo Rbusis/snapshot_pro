@@ -121,6 +121,29 @@ async function getAllTickers() {
   return j?.data ?? [];
 }
 
+// ========= MARKET CONTEXT =========
+async function getFearAndGreed() {
+  const j = await safeGetJson("https://api.alternative.me/fng/");
+  return j?.data?.[0]?.value ? parseInt(j.data[0].value) : null;
+}
+
+async function getBTCTrend() {
+  const tk = await getTicker("BTCUSDT");
+  if (!tk) return null;
+  const last = tk.lastPr ?? tk.markPrice ?? tk.close;
+
+  // Simple structure check: price vs 1h candles
+  const c1h = await getCandles("BTCUSDT", 3600, 24);
+  if (!c1h?.length) return null;
+
+  const vwp = vwap(c1h);
+  return {
+    price: last,
+    vwp: vwp,
+    isBullish: last > vwp
+  };
+}
+
 // ========= INDICATORS =========
 function rsi(values, p = 14) {
   if (!values || values.length < p + 1) return null;
@@ -237,8 +260,10 @@ async function processDiscovery(symbol) {
 function analyze(rec) {
   if (!rec) return null;
 
-  // Vol spike suffisant
-  if (rec.volRatio < 2) return null;
+  // Vol spike exigence asymétrique (+20% pour LONG)
+  let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
+  const volMin = dir === "LONG" ? 2.4 : 2.0;
+  if (rec.volRatio < volMin) return null;
 
   // Vola 24h : ni morte ni trop casino
   if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 22) return null;
@@ -247,7 +272,7 @@ function analyze(rec) {
 
   // 🎯 Gap asymétrique : LONG plus conservateur (évite extensions)
   let gapMin, gapMax;
-  if (rec.priceVsVwap > 0) {  // LONG
+  if (dir === "LONG") {
     gapMin = 0.3;  // Accepter gaps plus petits
     gapMax = 1.8;  // Éviter extensions (était 3.2)
   } else {  // SHORT
@@ -256,16 +281,24 @@ function analyze(rec) {
   }
   if (gap < gapMin || gap > gapMax) return null;
 
-  let dir = null;
-
-  if (rec.priceVsVwap > 0) {
+  if (dir === "LONG") {
     if (rec.wicks.upper > 2.0) return null;  // Plus tolérant (était 1.2)
     if (rec.obScore < 0) return null;
-    dir = "LONG";
   } else {
     if (rec.wicks.lower > 1.2) return null;
     if (rec.obScore > 0) return null;
-    dir = "SHORT";
+  }
+
+  // 🎯 NEW: Market Sentiment & BTC Filters for LONG
+  if (dir === "LONG") {
+    if (rec.mktContext?.fng != null && rec.mktContext.fng < 25) {
+      console.log(`[DISCOVERY SKIP] ${rec.symbol} — LONG blocked by Extreme Fear (${rec.mktContext.fng})`);
+      return null;
+    }
+    if (rec.mktContext?.btc && !rec.mktContext.btc.isBullish) {
+      console.log(`[DISCOVERY SKIP] ${rec.symbol} — LONG blocked by Bearish BTC Trend`);
+      return null;
+    }
   }
 
   // 🎯 Momentum filter for LONG (évite achats en dump)
@@ -345,6 +378,7 @@ function analyze(rec) {
     limitEntry: num(entry, decimals),
     sl: num(sl, decimals),
     tp: num(tp, decimals),
+    partialTP: num(bePrice, decimals), // TP 1 at 1R
     bePrice: num(bePrice, decimals),
     volRatio: num(rec.volRatio, 1),
     vola: num(rec.volaPct, 1),
@@ -405,6 +439,11 @@ async function scanDiscovery() {
     console.log(`🔄 [DISCOVERY] LIST UPDATE — ${DISCOVERY_SYMBOLS.length} PAIRS`);
   }
 
+  // Get Market Context
+  const [fng, btc] = await Promise.all([getFearAndGreed(), getBTCTrend()]);
+  const mktContext = { fng, btc };
+  console.log(`[DISCOVERY MARKET] F&G: ${fng} | BTC Bullish: ${btc?.isBullish}`);
+
   const BATCH = 5;
   const signals = [];
 
@@ -412,6 +451,7 @@ async function scanDiscovery() {
     const batch = DISCOVERY_SYMBOLS.slice(i, i + BATCH);
     const res = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res) {
+      if (r) r.mktContext = mktContext;
       const s = analyze(r, btcTrend); // btcTrend ignoré mais on laisse la signature
       if (s) signals.push(s);
     }
@@ -455,9 +495,10 @@ ${emoji} ${best.symbol} — ${best.direction}
 
 💰 Prix actuel: ${best.price}
 💠 Entry (limit): ${best.limitEntry}
-🎯 TP: ${best.tp}
+🎁 TP Partiel (50%): ${best.partialTP} (1R)
+🎯 TP Final: ${best.tp}
 🛑 SL: ${best.sl}
-🔒 SL → BE si prix atteint: ${best.bePrice}
+🔒 Sécurisation (SL → BE) @ ${best.bePrice}
 ⚖️ Levier suggéré: ${best.levier}
 
 📊 Vol Spike: x${best.volRatio}
