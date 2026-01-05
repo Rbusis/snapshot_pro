@@ -4,6 +4,7 @@
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
 import { isRecentlySignaled, registerSignal } from "./signals_registry.js";
+import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
 
 // ========= DEBUG =========
 function logDebug(...args) {
@@ -20,8 +21,9 @@ const SCAN_INTERVAL_MS = 2 * 60_000;
 const MIN_ALERT_DELAY_MS = 10 * 60_000;
 
 // 🎯 Directional bias (SHORT performs +1.18 USDT better)
-const DIRECTIONAL_BIAS = process.env.DEGEN_BIAS || "SHORT";
-const BIAS_STRICT_MODE = process.env.DEGEN_BIAS_STRICT === "true"; // Default: soft mode
+// DEPRECATED: manual bias. Now using Dynamic Bias via market_bias.js
+const DIRECTIONAL_BIAS = process.env.DEGEN_BIAS || "BOTH";
+const BIAS_STRICT_MODE = process.env.DEGEN_BIAS_STRICT === "true"; // Default: false (allow both)
 
 function shouldSkipDirection(direction) {
   if (DIRECTIONAL_BIAS === "BOTH") return false;
@@ -270,7 +272,7 @@ async function processDegen(symbol) {
 }
 
 // ========= ANALYZE =========
-function analyzeCandidate(rec) {
+function analyzeCandidate(rec, marketContext) {
   if (!rec) return null;
 
   let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
@@ -361,6 +363,9 @@ function analyzeCandidate(rec) {
 
   // 🎯 Scoring bonus asymétrique : LONG bonus restreint
   if (dir === "LONG" && rec.mktContext?.fng > 60) score += 10;
+
+  // 🎯 Dynamic Bias Adjustment
+  score += getBiasScoreAdjustment(dir, marketContext);
 
   // ======================
   // Entry LIMIT, SL, TP, BE
@@ -466,9 +471,10 @@ async function scanDegen() {
     lastSymbolUpdate = now;
   }
 
-  // Get Market Context
-  const [fng, btc] = await Promise.all([getFearAndGreed(), getBTCTrend()]);
+  // Get Market Context & Bias
+  const [fng, btc, marketContext] = await Promise.all([getFearAndGreed(), getBTCTrend(), getMarketBias()]);
   const mktContext = { fng, btc };
+  console.log(`[DEGEN BIAS] Market is ${marketContext.label} (BTC Trend: ${marketContext.btcTrend.toFixed(2)}%)`);
   console.log(`[DEGEN MARKET] F&G: ${fng} | BTC Bullish: ${btc?.isBullish}`);
 
   const BATCH = 5;
@@ -480,7 +486,7 @@ async function scanDegen() {
 
     for (const r of results) {
       if (r) r.mktContext = mktContext;
-      const s = analyzeCandidate(r);
+      const s = analyzeCandidate(r, marketContext);
       if (s) candidates.push(s);
     }
 
