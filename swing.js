@@ -2,6 +2,7 @@
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
+import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
 
 // ========= TELEGRAM =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -33,8 +34,9 @@ function logDebug(...args) {
 const SCAN_INTERVAL_MS = 30 * 60_000; // 30 minutes
 
 // 🎯 CRITICAL: SWING performs 10x better in LONG (analysis: +4.60 vs -5.67)
-const DIRECTIONAL_BIAS = process.env.SWING_BIAS || "LONG";
-const BIAS_STRICT_MODE = process.env.SWING_BIAS_STRICT !== "false"; // Default: strict
+// DEPRECATED: manual bias. Now using Dynamic Bias via market_bias.js
+const DIRECTIONAL_BIAS = process.env.SWING_BIAS || "BOTH";
+const BIAS_STRICT_MODE = process.env.SWING_BIAS_STRICT === "true"; // Default: false (allow both)
 
 function shouldSkipDirection(direction) {
   if (DIRECTIONAL_BIAS === "BOTH") return false;
@@ -293,7 +295,7 @@ async function processSymbol(symbol) {
 }
 
 // ========= SWING ENGINE =========
-function calculateJDSSwing(rec) {
+function calculateJDSSwing(rec, marketContext) {
   let score = 0;
 
   // RSI 15m extrêmes → énergie de swing (départ de move)
@@ -322,6 +324,12 @@ function calculateJDSSwing(rec) {
   if (rec.rsi["4h"] != null) {
     if (rec.rsi["4h"] > 50 && rec.rsi["4h"] < 70) score += 6;   // tendance haussière propre
     if (rec.rsi["4h"] < 50 && rec.rsi["4h"] > 30) score += 6;   // tendance baissière propre
+  }
+
+  // 🎯 Dynamic Bias Adjustment
+  const dirPredict = detectDirection(rec, score);
+  if (dirPredict !== "NEUTRAL") {
+    score += getBiasScoreAdjustment(dirPredict, marketContext);
   }
 
   return score;
@@ -421,10 +429,14 @@ async function scanOnce() {
     if (i + 5 < SYMBOLS.length) await sleep(800);
   }
 
+  // Get Market Bias
+  const marketContext = await getMarketBias();
+  console.log(`[SWING BIAS] Market is ${marketContext.label} (BTC Trend: ${marketContext.btcTrend.toFixed(2)}%)`);
+
   const setups = [];
 
   for (const rec of snaps) {
-    const jds = calculateJDSSwing(rec);
+    const jds = calculateJDSSwing(rec, marketContext);
 
     // Log de calibration
     console.log(`[SWING JDS] ${rec.symbol} => ${jds.toFixed(1)}`);
@@ -438,7 +450,7 @@ async function scanOnce() {
 
     // 🎯 Apply directional bias filter (CRITICAL: SHORT are toxic for SWING)
     if (shouldSkipDirection(dir)) {
-      console.log(`[SWING SKIP] ${rec.symbol} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
+      console.log(`[SWING SKIP] ${sym} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
       continue;
     }
     if (!isTimingGood(rec, dir)) continue;
