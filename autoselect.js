@@ -3,6 +3,7 @@
 import process from "process";
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
+import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
 
 // ========= CONFIG =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -14,8 +15,9 @@ const MAX_SIGNALS_PER_SCAN = 3;      // max 3 signaux par message
 const SUGGESTED_LEVERAGE = "4x";   // levier conseillé TOP30
 
 // 🎯 TOP30 performs +5.65 USDT better in SHORT (analysis: SHORT -0.56 vs LONG -6.21)
-const DIRECTIONAL_BIAS = process.env.TOP30_BIAS || "SHORT";
-const BIAS_STRICT_MODE = process.env.TOP30_BIAS_STRICT !== "false"; // Default: strict
+// DEPRECATED: manual bias. Now using Dynamic Bias via market_bias.js
+const DIRECTIONAL_BIAS = process.env.TOP30_BIAS || "BOTH";
+const BIAS_STRICT_MODE = process.env.TOP30_BIAS_STRICT === "true"; // Default: false (allow both)
 
 function shouldSkipDirection(direction) {
   if (DIRECTIONAL_BIAS === "BOTH") return false;
@@ -241,10 +243,13 @@ async function processSymbol(symbol) {
 }
 
 // ====== JDS Engine (raccourci) ======
-function fuseJDS(rec) {
-  // 🎯 Bias asymétrique : SHORT preferred (Phase 1: SHORT -0.56 vs LONG -6.21)
-  const mms_short_adjusted = rec.MMS_short + 10;  // Bonus SHORT
-  const mms_long_adjusted = rec.MMS_long - 5;    // Malus LONG
+function fuseJDS(rec, marketContext) {
+  // 🎯 Dynamic Bias via market_bias.js
+  const short_adj = getBiasScoreAdjustment("SHORT", marketContext);
+  const long_adj = getBiasScoreAdjustment("LONG", marketContext);
+
+  const mms_short_adjusted = rec.MMS_short + short_adj;
+  const mms_long_adjusted = rec.MMS_long + long_adj;
 
   if (mms_short_adjusted > mms_long_adjusted) {
     return { direction: "SHORT", jds: rec.MMS_short };
@@ -426,9 +431,13 @@ async function scanOnce() {
     return;
   }
 
+  // Get Market Bias
+  const marketContext = await getMarketBias();
+  console.log(`[TOP30 BIAS] Market is ${marketContext.label} (BTC Trend: ${marketContext.btcTrend.toFixed(2)}%)`);
+
   const candidates = [];
   for (const rec of snapshots) {
-    const fusion = fuseJDS(rec);
+    const fusion = fuseJDS(rec, marketContext);
     if (!fusion) continue;
 
     const jds = fusion.jds;
@@ -523,14 +532,10 @@ async function scanOnce() {
 // ========= MAIN =========
 export async function startAutoselect() {
   console.log("🔥 JTF TOP 30 On (v0.8.9)");
-    await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
+  await sendTelegram("🟢 JTF TOP 30 v0.8.9 On");
   while (true) {
-    try {
-      await scanOnce();
-    } catch (e) {
-      console.error("[TOP30 ERROR]", e);
-    }
+    try { await scanOnce(); }
+    catch (e) { console.log("[TOP30 ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
- 
