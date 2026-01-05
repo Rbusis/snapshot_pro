@@ -4,6 +4,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import { DEBUG } from "./debug.js";
 import { isRecentlySignaled, registerSignal } from "./signals_registry.js";
+import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
 
 // ========= DEBUG =========
 function logDebug(...args) {
@@ -19,8 +20,9 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const SCAN_INTERVAL_MS = 5 * 60_000;
 
 // 🎯 DISCOVERY performs +7.51 USDT better in SHORT (analysis: SHORT +0.50 vs LONG -7.01)
-const DIRECTIONAL_BIAS = process.env.DISCOVERY_BIAS || "SHORT";
-const BIAS_STRICT_MODE = process.env.DISCOVERY_BIAS_STRICT !== "false"; // Default: strict
+// DEPRECATED: manual bias. Now using Dynamic Bias via market_bias.js
+const DIRECTIONAL_BIAS = process.env.DISCOVERY_BIAS || "BOTH";
+const BIAS_STRICT_MODE = process.env.DISCOVERY_BIAS_STRICT === "true"; // Default: false (allow both)
 
 function shouldSkipDirection(direction) {
   if (DIRECTIONAL_BIAS === "BOTH") return false;
@@ -257,7 +259,7 @@ async function processDiscovery(symbol) {
 }
 
 // ========= ANALYZE =========
-function analyze(rec) {
+function analyze(rec, marketContext) {
   if (!rec) return null;
 
   // Vol spike exigence asymétrique (+20% pour LONG)
@@ -322,6 +324,9 @@ function analyze(rec) {
     score += rec.change24 > 5 ? 20 : 10;  // Bonus plus gros si fort pump
   }
   if (dir === "SHORT" && rec.change24 < 0) score += 10;
+
+  // 🎯 Dynamic Bias Adjustment
+  score += getBiasScoreAdjustment(dir, marketContext);
 
   if (score < 78) return null;
 
@@ -439,9 +444,10 @@ async function scanDiscovery() {
     console.log(`🔄 [DISCOVERY] LIST UPDATE — ${DISCOVERY_SYMBOLS.length} PAIRS`);
   }
 
-  // Get Market Context
-  const [fng, btc] = await Promise.all([getFearAndGreed(), getBTCTrend()]);
+  // Get Market Context & Bias
+  const [fng, btc, marketContext] = await Promise.all([getFearAndGreed(), getBTCTrend(), getMarketBias()]);
   const mktContext = { fng, btc };
+  console.log(`[DISCOVERY BIAS] Market is ${marketContext.label} (BTC Trend: ${marketContext.btcTrend.toFixed(2)}%)`);
   console.log(`[DISCOVERY MARKET] F&G: ${fng} | BTC Bullish: ${btc?.isBullish}`);
 
   const BATCH = 5;
@@ -452,7 +458,7 @@ async function scanDiscovery() {
     const res = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res) {
       if (r) r.mktContext = mktContext;
-      const s = analyze(r, btcTrend); // btcTrend ignoré mais on laisse la signature
+      const s = analyze(r, marketContext);
       if (s) signals.push(s);
     }
     await sleep(200);
