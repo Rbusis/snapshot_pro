@@ -69,6 +69,20 @@ const lastAlerts = new Map();
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const num = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
+
+function getPriceDecimals(price) {
+  if (price == null || !isFinite(price)) return 4;
+  const p = Math.abs(price);
+  if (p >= 1000) return 2;
+  if (p >= 100) return 3;
+  if (p >= 1) return 4;
+  if (p >= 0.1) return 5;
+  if (p >= 0.01) return 6;
+  if (p >= 0.001) return 7;
+  if (p >= 0.0001) return 8;
+  return 10;
+}
+
 const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 
 // ========= SAFE FETCH =========
@@ -394,13 +408,14 @@ function buildPlan(rec, dir) {
     ? entry + (absRisk * 1.5)  // +1.5R instead of +1R (avoid premature BE)
     : entry - (absRisk * 1.5);
 
+  const decimals = getPriceDecimals(entry);
   return {
-    entry: num(entry, 4),
-    sl: num(sl, 4),
-    tp: num(tp, 4),
+    entry: num(entry, decimals),
+    sl: num(sl, decimals),
+    tp: num(tp, decimals),
     rr,
     riskPct: +num(riskPct, 2),
-    beTrigger: num(beTrigger, 4)
+    beTrigger: num(beTrigger, decimals)
   };
 }
 
