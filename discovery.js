@@ -63,15 +63,15 @@ const num = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
 // Gestion décimales pour tous les prix (incl. micro-caps type PEPE)
 function getPriceDecimals(price) {
   if (price == null || !isFinite(price)) return 4;
-
   const p = Math.abs(price);
-
-  if (p >= 100) return 2;
+  if (p >= 1000) return 2;
+  if (p >= 100) return 3;
   if (p >= 1) return 4;
   if (p >= 0.1) return 5;
   if (p >= 0.01) return 6;
   if (p >= 0.001) return 7;
-  return 8; // micro-prix (PEPE & co)
+  if (p >= 0.0001) return 8;
+  return 10;
 }
 
 async function safeGetJson(url) {
