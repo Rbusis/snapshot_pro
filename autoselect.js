@@ -57,6 +57,20 @@ const lastSentDirection = new Map(); // Tracking per symbol to prevent rapid fli
 // ========= UTIL =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const num = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
+
+function getPriceDecimals(price) {
+  if (price == null || !isFinite(price)) return 4;
+  const p = Math.abs(price);
+  if (p >= 1000) return 2;
+  if (p >= 100) return 3;
+  if (p >= 1) return 4;
+  if (p >= 0.1) return 5;
+  if (p >= 0.01) return 6;
+  if (p >= 0.001) return 7;
+  if (p >= 0.0001) return 8;
+  return 10;
+}
+
 const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 const baseSymbol = s => s.replace("_UMCBL", "");
 
@@ -306,7 +320,7 @@ function estimateRR(vola) {
 function buildTradePlan(rec, fusion, jds, rr) {
   const p = rec.last;              // prix actuel
   const dir = fusion.direction;
-  const decimals = p < 0.01 ? 6 : p < 0.1 ? 5 : 4;
+  const decimals = getPriceDecimals(p);
 
   const riskPct = clamp((rec.volaPct ?? 5) / 3, 0.5, 5);
   const rewardPct = riskPct * rr;
