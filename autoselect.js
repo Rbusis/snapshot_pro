@@ -11,6 +11,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS = 5 * 60_000;
 const MIN_ALERT_DELAY_MS = 3 * 60_000;
+const FLIP_COOLDOWN_MS = 15 * 60_000; // Cooldown for opposite signals (3 scan cycles)
 const MAX_SIGNALS_PER_SCAN = 3;      // max 3 signaux par message
 const SUGGESTED_LEVERAGE = "4x";   // levier conseillé TOP30
 
@@ -51,6 +52,7 @@ const MIN_OI_FOR_LONG_OK = -0.6;
 // ========= STATE =========
 const prevOI = new Map();
 const lastAlerts = new Map();
+const lastSentDirection = new Map(); // Tracking per symbol to prevent rapid flipping
 
 // ========= UTIL =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -219,8 +221,8 @@ async function processSymbol(symbol) {
   const vwap1h = vwap(c1h.slice(-48));
   const deltaVWAP = vwap1h ? percent(last, vwap1h) : null;
 
-  const MMS_long = toScore100(-(dP15 / 2) || 0);
-  const MMS_short = toScore100(+(dP15 / 2) || 0);
+  const MMS_long = toScore100(-(dP15 / 3) || 0);
+  const MMS_short = toScore100(+(dP15 / 3) || 0);
 
   const deltaVWAPpct = deltaVWAP != null ? +num(deltaVWAP, 4) : null;
   const deltaOIpct = deltaOI != null ? +num(deltaOI, 3) : null;
@@ -365,17 +367,30 @@ function shouldSendFor(symbol, dir, reco) {
   const now = Date.now();
   const last = lastAlerts.get(key);
 
+  // 1) Logic to prevent rapid direction flipping (e.g., LONG immediately after SHORT)
+  const lastDir = lastSentDirection.get(symbol);
+  if (lastDir && lastDir.direction !== dir) {
+    if (now - lastDir.ts < FLIP_COOLDOWN_MS) {
+      console.log(`[TOP30 SPAM] ${symbol} — direction flip ${lastDir.direction} -> ${dir} ignored (cooldown)`);
+      return false;
+    }
+  }
+
+  // 2) Standard per-direction alert throttling
   if (!last) {
     lastAlerts.set(key, { ts: now, reco });
+    lastSentDirection.set(symbol, { ts: now, direction: dir });
     return true;
   }
   if (last.reco !== reco) {
     lastAlerts.set(key, { ts: now, reco });
+    lastSentDirection.set(symbol, { ts: now, direction: dir });
     return true;
   }
   if (now - last.ts < MIN_ALERT_DELAY_MS) return false;
 
   lastAlerts.set(key, { ts: now, reco });
+  lastSentDirection.set(symbol, { ts: now, direction: dir });
   return true;
 }
 
