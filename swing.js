@@ -509,8 +509,8 @@ async function scanOnce() {
     msg += `*${s.symbol}* — ${emoji} *${s.dir}*\n\n`;
     msg += `💰 Prix spot: ${num(s.rec.last, 4)}\n`;
     msg += `💠 Entry (swing): ${s.plan.entry}\n`;
-    msg += `🛑 SL: ${s.plan.sl}\n`;
     msg += `🎯 TP: ${s.plan.tp}\n`;
+    msg += `🛑 SL: ${s.plan.sl}\n`;
     msg += `📏 R:R ≈ ${s.plan.rr.toFixed(2)}  (risque ≈ ${s.plan.riskPct}%)\n`;
     msg += `⚖️ Levier conseillé: ${s.lev}\n`;
     msg += `🔁 SL → BE si prix atteint: ${s.plan.beTrigger}\n\n`;
