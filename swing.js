@@ -209,6 +209,7 @@ async function scanOnce() {
 
 export async function startSwing() {
   console.log("🔥 SWING v2.0 On");
+  await sendTelegram("🟢 JTF SWING v2.0 On");
   while (true) {
     try { await scanOnce(); } catch (e) { console.error("[SWING ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
