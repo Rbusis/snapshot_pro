@@ -11,6 +11,19 @@ import { applyAdvancedFilters } from "./filters.js";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+async function sendTelegram(msg) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: "Markdown" })
+    });
+  } catch (e) {
+    console.error("[TELEGRAM ERROR]", e);
+  }
+}
+
 const SCAN_INTERVAL_MS = 5 * 60_000;
 const MIN_ALERT_DELAY_MS = 15 * 60_000;
 const FLIP_COOLDOWN_MS = 30 * 60_000;
