@@ -1,10 +1,11 @@
-// discovery.js — JTF DISCOVERY v1.9 (API v2 + Debug + Registry Anti-Doublons)
+// discovery.js — JTF DISCOVERY v2.0 (Advanced Phase 3 Edition)
 
 import fetch from "node-fetch";
 import fs from "fs";
 import { DEBUG } from "./debug.js";
-import { isRecentlySignaled, registerSignal } from "./signals_registry.js";
+import { isRecentlySignaled, registerSignal, isTimeBlocked } from "./signals_registry.js";
 import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
+import { applyAdvancedFilters } from "./filters.js";
 
 // ========= DEBUG =========
 function logDebug(...args) {
@@ -19,25 +20,17 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS = 5 * 60_000;
 
-// 🎯 DISCOVERY performs +7.51 USDT better in SHORT (analysis: SHORT +0.50 vs LONG -7.01)
-// DEPRECATED: manual bias. Now using Dynamic Bias via market_bias.js
 const DIRECTIONAL_BIAS = process.env.DISCOVERY_BIAS || "BOTH";
-const BIAS_STRICT_MODE = process.env.DISCOVERY_BIAS_STRICT === "true"; // Default: false (allow both)
+const BIAS_STRICT_MODE = process.env.DISCOVERY_BIAS_STRICT === "true";
 
 function shouldSkipDirection(direction) {
   if (DIRECTIONAL_BIAS === "BOTH") return false;
-  if (BIAS_STRICT_MODE) {
-    return direction !== DIRECTIONAL_BIAS;
-  }
-  return false;
+  return BIAS_STRICT_MODE ? direction !== DIRECTIONAL_BIAS : false;
 }
+
 const MIN_ALERT_DELAY_MS = 15 * 60_000;
 const GLOBAL_COOLDOWN_MS = 30 * 60_000;
 const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
-
-// BTC Trend désactivé (placeholder si on veut le remettre plus tard)
-const BTC_LONG_MIN = -0.2;
-const BTC_SHORT_MAX = +0.5;
 
 // ========= STATE =========
 let DISCOVERY_SYMBOLS = [];
@@ -45,14 +38,15 @@ let lastSymbolUpdate = 0;
 let lastGlobalTradeTime = 0;
 const lastAlerts = new Map();
 
-// ========= BLACKLIST TOP30 =========
+// ========= BLACKLIST (TOXIC) =========
 const IGNORE_LIST = [
   "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
   "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "TRXUSDT",
   "LINKUSDT", "TONUSDT", "SUIUSDT", "APTUSDT", "NEARUSDT",
   "ARBUSDT", "OPUSDT", "INJUSDT", "ATOMUSDT", "AAVEUSDT",
   "LTCUSDT", "UNIUSDT", "FILUSDT", "XLMUSDT", "RUNEUSDT",
-  "ALGOUSDT", "PEPEUSDT", "WIFUSDT", "TIAUSDT", "SEIUSDT"
+  "ALGOUSDT", "PEPEUSDT", "WIFUSDT", "TIAUSDT", "SEIUSDT",
+  "WIFUSDT_UMCBL" // Doublé pour sécurité
 ];
 
 // ========= UTILS =========
@@ -60,90 +54,39 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 const num = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
 
-// Gestion décimales pour tous les prix (incl. micro-caps type PEPE)
 function getPriceDecimals(price) {
   if (price == null || !isFinite(price)) return 4;
   const p = Math.abs(price);
   if (p >= 1000) return 2;
   if (p >= 100) return 3;
   if (p >= 1) return 4;
-  if (p >= 0.1) return 5;
-  if (p >= 0.01) return 6;
-  if (p >= 0.001) return 7;
-  if (p >= 0.0001) return 8;
-  return 10;
+  return 5;
 }
 
 async function safeGetJson(url) {
   try {
     const r = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!r.ok) return null;
-    return await r.json();
+    return r.ok ? await r.json() : null;
   } catch (e) {
-    logDebug("safeGetJson ERROR", e);
     return null;
   }
 }
 
 // ========= API v2 =========
 async function getTicker(symbol) {
-  logDebug("getTicker", symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
-  );
+  const j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`);
   return j?.data ? (Array.isArray(j.data) ? j.data[0] : j.data) : null;
 }
 
 async function getCandles(symbol, seconds, limit = 200) {
-  logDebug("getCandles", symbol, seconds);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
-  );
+  const j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`);
   if (!j?.data?.length) return [];
-  return j.data.map(c => ({
-    t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5]
-  })).sort((a, b) => a.t - b.t);
-}
-
-async function getDepth(symbol) {
-  logDebug("getDepth", symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`
-  );
-  if (!j?.data) return null;
-  const d = Array.isArray(j.data) ? j.data[0] : j.data;
-  return d?.bids && d?.asks ? d : null;
+  return j.data.map(c => ({ t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5] })).sort((a, b) => a.t - b.t);
 }
 
 async function getAllTickers() {
-  logDebug("getAllTickers()");
-  const j = await safeGetJson(
-    "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-  );
+  const j = await safeGetJson("https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures");
   return j?.data ?? [];
-}
-
-// ========= MARKET CONTEXT =========
-async function getFearAndGreed() {
-  const j = await safeGetJson("https://api.alternative.me/fng/");
-  return j?.data?.[0]?.value ? parseInt(j.data[0].value) : null;
-}
-
-async function getBTCTrend() {
-  const tk = await getTicker("BTCUSDT");
-  if (!tk) return null;
-  const last = tk.lastPr ?? tk.markPrice ?? tk.close;
-
-  // Simple structure check: price vs 1h candles
-  const c1h = await getCandles("BTCUSDT", 3600, 24);
-  if (!c1h?.length) return null;
-
-  const vwp = vwap(c1h);
-  return {
-    price: last,
-    vwp: vwp,
-    isBullish: last > vwp
-  };
 }
 
 // ========= INDICATORS =========
@@ -156,7 +99,6 @@ function rsi(values, p = 14) {
   }
   g /= p; l = (l / p) || 1e-9;
   let val = 100 - 100 / (1 + (g / l));
-
   for (let i = p + 1; i < values.length; i++) {
     const d = values[i] - values[i - 1];
     g = (g * (p - 1) + Math.max(d, 0)) / p;
@@ -170,8 +112,7 @@ function vwap(c) {
   let pv = 0, v = 0;
   for (const k of c) {
     const p = (k.h + k.l + k.c) / 3;
-    pv += p * k.v;
-    v += k.v;
+    pv += p * k.v; v += k.v;
   }
   return v ? pv / v : null;
 }
@@ -180,354 +121,134 @@ function wicks(c) {
   if (!c) return { upper: 0, lower: 0 };
   const top = Math.max(c.o, c.c);
   const bot = Math.min(c.o, c.c);
-  return {
-    upper: ((c.h - top) / c.c) * 100,
-    lower: ((bot - c.l) / c.c) * 100
-  };
+  return { upper: ((c.h - top) / c.c) * 100, lower: ((bot - c.l) / c.c) * 100 };
 }
 
 // ========= PROCESS =========
 async function processDiscovery(symbol) {
-  logDebug("processDiscovery", symbol);
-
   const tk = await getTicker(symbol);
   if (!tk) return null;
+  const last = +(tk.lastPr ?? tk.markPrice ?? tk.last ?? 0);
+  if (!last) return null;
 
-  const last = (tk.lastPr ?? tk.markPrice ?? tk.close ?? tk.last ?? NaN);
-
-  if (!last || Number.isNaN(last)) {
-    logDebug("invalid last", symbol);
-    return null;
-  }
-
-  const high24 = tk.high24h != null ? +tk.high24h : null;
-  const low24 = tk.low24h != null ? +tk.low24h : null;
-
-  const volaPct = (high24 != null && low24 != null)
-    ? ((high24 - low24) / last) * 100
-    : null;
-
-  const [c5m, c15m] = await Promise.all([
-    getCandles(symbol, 300, 100),
-    getCandles(symbol, 900, 100)
-  ]);
-
-  if (!c5m?.length) {
-    logDebug("missing 5m", symbol);
-    return null;
-  }
+  const [c5m, c15m] = await Promise.all([getCandles(symbol, 300, 100), getCandles(symbol, 900, 100)]);
+  if (!c5m?.length) return null;
 
   const rsi5 = rsi(c5m.map(x => x.c));
-  const rsi15 = rsi(c15m.map(x => x.c));
-
   const vwp = vwap(c5m.slice(-24));
   const priceVsVwap = vwp ? ((last - vwp) / vwp) * 100 : 0;
-
   const lastC = c5m[c5m.length - 1];
   const wick = wicks(lastC);
-
-  const lastVol = lastC.v;
   const avgVol = c5m.slice(-11, -1).reduce((a, b) => a + b.v, 0) / 10;
-  const volRatio = avgVol > 0 ? lastVol / avgVol : 1;
+  const volRatio = avgVol > 0 ? lastC.v / avgVol : 1;
 
-  const change24 = tk.change24h != null ? +tk.change24h : 0;
-
-  const depth = await getDepth(symbol);
-  let obScore = 0, bids = 0, asks = 0;
-
-  if (depth) {
-    bids = depth.bids.slice(0, 10).reduce((a, x) => a + (+x[1]), 0);
-    asks = depth.asks.slice(0, 10).reduce((a, x) => a + (+x[1]), 0);
-    if (asks > 0) {
-      const r = bids / asks;
-      if (r > 1.25) obScore = 1;
-      else if (r < 0.75) obScore = -1;
-    }
-  }
-
-  // Log DATA si besoin (optionnel)
-  console.log(
-    `[DISCOVERY DATA] ${symbol} | P=${last} | Vola=${volaPct != null ? volaPct.toFixed(2) : "n/a"}% | ` +
-    `volRatio=${volRatio.toFixed(2)} | ΔVWAP=${priceVsVwap.toFixed(2)} | ` +
-    `RSI5=${rsi5 != null ? rsi5.toFixed(1) : "n/a"} | OB=${obScore}`
-  );
-
-  return {
-    symbol, last, volaPct, rsi5, rsi15, priceVsVwap,
-    volRatio, change24, obScore, bidsVol: bids, asksVol: asks, wicks: wick
-  };
+  return { symbol, last, volaPct: tk.high24h && tk.low24h ? ((+tk.high24h - +tk.low24h) / last) * 100 : 5, rsi5, priceVsVwap, volRatio, change24: +tk.change24h || 0, wicks: wick };
 }
 
 // ========= ANALYZE =========
-function analyze(rec, marketContext) {
+async function analyzeDiscovery(rec, marketContext) {
   if (!rec) return null;
 
-  // Vol spike exigence asymétrique (+20% pour LONG)
   let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
-  const volMin = dir === "LONG" ? 2.4 : 2.0;
-  if (rec.volRatio < volMin) return null;
-
-  // Vola 24h : ni morte ni trop casino
+  if (rec.volRatio < (dir === "LONG" ? 2.4 : 2.0)) return null;
   if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 22) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-
-  // 🎯 Gap asymétrique : LONG plus conservateur (évite extensions)
-  let gapMin, gapMax;
-  if (dir === "LONG") {
-    gapMin = 0.3;  // Accepter gaps plus petits
-    gapMax = 1.8;  // Éviter extensions (était 3.2)
-  } else {  // SHORT
-    gapMin = 0.6;
-    gapMax = 3.2;  // SHORT ok avec extensions
-  }
+  const [gapMin, gapMax] = dir === "LONG" ? [0.3, 1.8] : [0.6, 3.2];
   if (gap < gapMin || gap > gapMax) return null;
 
   if (dir === "LONG") {
-    if (rec.wicks.upper > 2.0) return null;  // Plus tolérant (était 1.2)
-    if (rec.obScore < 0) return null;
+    if (rec.wicks.upper > 2.0 || rec.change24 < -2) return null;
   } else {
     if (rec.wicks.lower > 1.2) return null;
-    if (rec.obScore > 0) return null;
-  }
-
-  // 🎯 NEW: Market Sentiment & BTC Filters for LONG
-  if (dir === "LONG") {
-    if (rec.mktContext?.fng != null && rec.mktContext.fng < 25) {
-      console.log(`[DISCOVERY SKIP] ${rec.symbol} — LONG blocked by Extreme Fear (${rec.mktContext.fng})`);
-      return null;
-    }
-    if (rec.mktContext?.btc && !rec.mktContext.btc.isBullish) {
-      console.log(`[DISCOVERY SKIP] ${rec.symbol} — LONG blocked by Bearish BTC Trend`);
-      return null;
-    }
-  }
-
-  // 🎯 Momentum filter for LONG (évite achats en dump)
-  if (dir === "LONG") {
-    if (rec.change24 < -2) return null;  // Skip si dump fort 24h
   }
 
   let score = 0;
   score += rec.volRatio >= 3 ? 30 : 15;
   score += (gap >= 1 && gap <= 2.2) ? 20 : 10;
-
-  // 🎯 RSI asymétrique : LONG entre plus tôt (45-65 vs 55-75)
-  score += (dir === "LONG"
-    ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 15 : 5)  // Optimisé pour LONG
-    : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 15 : 5)
-  );
-  if ((dir === "LONG" && rec.obScore === 1) || (dir === "SHORT" && rec.obScore === -1)) score += 15;
-
-  // 🎯 Scoring asymétrique : LONG bonus fort si pump
-  if (dir === "LONG" && rec.change24 > 0) {
-    score += rec.change24 > 5 ? 20 : 10;  // Bonus plus gros si fort pump
-  }
-  if (dir === "SHORT" && rec.change24 < 0) score += 10;
-
-  // 🎯 Dynamic Bias Adjustment
+  score += (dir === "LONG" ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 15 : 5) : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 15 : 5));
   score += getBiasScoreAdjustment(dir, marketContext);
 
-  if (score < 78) return null;
+  // 🎯 Score filters phase 3 (DEGEN Trap protection)
+  if (score > 95) {
+    console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 95 is too risky`);
+    return null;
+  }
+  if (score < 80) return null;
 
-  // 🔢 Décimales adaptées au niveau de prix (micro-caps inclus)
+  // 🎯 Advanced Filters (Orderbook/Funding)
+  const adv = await applyAdvancedFilters(rec.symbol, dir, score);
+  if (adv.isBlocked) {
+    console.log(`[DISCOVERY BLOCKED] ${rec.symbol} — ${adv.reason}`);
+    return null;
+  }
+  score += adv.scoreAdj;
+
   const decimals = getPriceDecimals(rec.last);
   const gapPc = gap / 100;
-
-  // Limit order (retrace contrôlé)
-  const entry = dir === "LONG"
-    ? rec.last * (1 - gapPc * 0.25)
-    : rec.last * (1 + gapPc * 0.25);
-
-  // Risque relatif à la vola (2–5%)
+  const entry = dir === "LONG" ? rec.last * (1 - gapPc * 0.25) : rec.last * (1 + gapPc * 0.25);
   const riskPct = clamp((rec.volaPct / 5) * 2, 2, 5);
+  const rr = 1.6;
 
-  // SL & TP basés sur l'ENTRY (et pas le prix spot)
-  let slRaw = dir === "LONG"
-    ? entry * (1 - riskPct / 100)
-    : entry * (1 + riskPct / 100);
+  let sl = dir === "LONG" ? entry * (1 - riskPct / 100) : entry * (1 + riskPct / 100);
+  let tp1 = dir === "LONG" ? entry * (1 + riskPct / 100) : entry * (1 - riskPct / 100); // 1R partial
+  let tp2 = dir === "LONG" ? entry * (1 + (riskPct * rr) / 100) : entry * (1 - (riskPct * rr) / 100);
 
-  const rr = 1.6; // realistic target (was 2.0, caused 15% BE rate)
-  // Analysis Phase 1: 6/39 trades (15%) ended at BE with 2.0R target
-  // Expected: BE 15% → 6-8%, WR 39% → 45-48%
+  // Correction BE (Anti-Negative BE)
+  const bePrice = dir === "LONG" ? entry * 1.002 : entry * 0.998; // +0.2% flush commission
 
-  let tpRaw = dir === "LONG"
-    ? entry * (1 + (riskPct * rr) / 100)
-    : entry * (1 - (riskPct * rr) / 100);
-
-  // ✅ Sécuriser l'ordre Entry / SL / TP
-  let sl = slRaw;
-  let tp = tpRaw;
-
-  if (dir === "LONG") {
-    if (sl >= entry) sl = entry * (1 - Math.abs(riskPct) / 100);
-    if (tp <= entry) tp = entry * (1 + Math.abs(riskPct * rr) / 100);
-  } else {
-    if (sl <= entry) sl = entry * (1 + Math.abs(riskPct) / 100);
-    if (tp >= entry) tp = entry * (1 - Math.abs(riskPct * rr) / 100);
-  }
-
-  // 🔒 Prix où on passe le SL à BE (1R)
-  const riskAbs = Math.abs(entry - sl);
-  const bePrice = dir === "LONG"
-    ? entry + riskAbs
-    : entry - riskAbs;
-
-  const lev = riskPct > 4 ? "2x" : "3x";
-
-  return {
-    symbol: rec.symbol,
-    direction: dir,
-    score,
-    price: num(rec.last, decimals),          // prix actuel formaté
-    limitEntry: num(entry, decimals),
-    sl: num(sl, decimals),
-    tp: num(tp, decimals),
-    partialTP: num(bePrice, decimals), // TP 1 at 1R
-    bePrice: num(bePrice, decimals),
-    volRatio: num(rec.volRatio, 1),
-    vola: num(rec.volaPct, 1),
-    obRatio: rec.asksVol > 0 ? (rec.bidsVol / rec.asksVol).toFixed(2) : "N/A",
-    levier: lev
-  };
-}
-
-// ========= TELEGRAM =========
-async function sendTelegram(msg) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: msg,
-        parse_mode: "Markdown"
-      })
-    });
-  } catch { }
-}
-
-function antiSpam(symbol, dir) {
-  const key = `${symbol}-${dir}`;
-  const now = Date.now();
-  const last = lastAlerts.get(key);
-  if (last && now - last < MIN_ALERT_DELAY_MS) return false;
-  lastAlerts.set(key, now);
-  return true;
+  return { symbol: rec.symbol, direction: dir, score, price: num(rec.last, decimals), limitEntry: num(entry, decimals), sl: num(sl, decimals), tp1: num(tp1, decimals), tp2: num(tp2, decimals), bePrice: num(bePrice, decimals), levier: riskPct > 4 ? "2x" : "3x" };
 }
 
 // ========= MAIN LOOP =========
 async function scanDiscovery() {
+  if (isTimeBlocked()) {
+    console.log("🌙 [DISCOVERY] Midnight Window (Taiwan) — Blocking new entries");
+    return;
+  }
   const start = Date.now();
   console.log("🔍 [DISCOVERY] SCAN STARTED...");
 
-  const now = start;
-  const btcTrend = 0; // placeholder si on veut remettre un filtre BTC plus tard
-
-  // Refresh liste
-  if (now - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length) {
+  if (start - lastSymbolUpdate > SYMBOL_UPDATE_INTERVAL || !DISCOVERY_SYMBOLS.length) {
     const all = await getAllTickers();
-    let list = all.filter(t =>
-      t.symbol?.endsWith("USDT") &&
-      !IGNORE_LIST.includes(t.symbol) &&
-      (+t.usdtVolume > 5_000_000)
-    );
-    list.sort((a, b) => (+b.usdtVolume) - (+a.usdtVolume));
-    DISCOVERY_SYMBOLS = list.slice(0, 50).map(t => t.symbol);
-
-    try {
-      fs.writeFileSync("./config/discovery_list.json", JSON.stringify(DISCOVERY_SYMBOLS, null, 2));
-    } catch { }
-
-    lastSymbolUpdate = now;
-    console.log(`🔄 [DISCOVERY] LIST UPDATE — ${DISCOVERY_SYMBOLS.length} PAIRS`);
+    DISCOVERY_SYMBOLS = all.filter(t => t.symbol?.endsWith("USDT") && !IGNORE_LIST.includes(t.symbol) && (+t.usdtVolume > 5_000_000))
+      .sort((a, b) => (+b.usdtVolume) - (+a.usdtVolume)).slice(0, 50).map(t => t.symbol);
+    lastSymbolUpdate = start;
   }
 
-  // Get Market Context & Bias
-  const [fng, btc, marketContext] = await Promise.all([getFearAndGreed(), getBTCTrend(), getMarketBias()]);
-  const mktContext = { fng, btc };
-  console.log(`[DISCOVERY BIAS] Market is ${marketContext.label} (BTC Trend: ${marketContext.btcTrend.toFixed(2)}%)`);
-  console.log(`[DISCOVERY MARKET] F&G: ${fng} | BTC Bullish: ${btc?.isBullish}`);
-
-  const BATCH = 5;
+  const marketContext = await getMarketBias();
   const signals = [];
-
-  for (let i = 0; i < DISCOVERY_SYMBOLS.length; i += BATCH) {
-    const batch = DISCOVERY_SYMBOLS.slice(i, i + BATCH);
+  for (let i = 0; i < DISCOVERY_SYMBOLS.length; i += 5) {
+    const batch = DISCOVERY_SYMBOLS.slice(i, i + 5);
     const res = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res) {
-      if (r) r.mktContext = mktContext;
-      const s = analyze(r, marketContext);
+      const s = await analyzeDiscovery(r, marketContext);
       if (s) signals.push(s);
     }
     await sleep(200);
   }
 
-  const duration = Date.now() - start;
-  console.log(`[DISCOVERY] SCAN — ${DISCOVERY_SYMBOLS.length} PAIRS | ${duration} MS | ${signals.length} SETUP`);
-
-  if (!signals.length) {
-    return;
-  }
-
+  if (!signals.length) return;
   const best = signals.sort((a, b) => b.score - a.score)[0];
 
-  // 🔁 Éviter doublons avec les autres bots (DEGEN, SWING, TOP30…)
-  if (isRecentlySignaled(best.symbol)) {
-    console.log(`[DISCOVERY SKIP] ${best.symbol} — déjà signalé récemment par un autre bot`);
-    return;
-  }
-
-  if (now - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS) {
-    console.log(`[DISCOVERY] COOLDOWN — ${best.symbol}`);
-    return;
-  }
-
-  if (!antiSpam(best.symbol, best.direction)) {
-    console.log(`[DISCOVERY] ANTISPAM — ${best.symbol}`);
-    return;
-  }
-
-  console.log(`[DISCOVERY] SIGNAL — ${best.symbol} ${best.direction} | SCORE ${best.score}`);
+  if (isRecentlySignaled(best.symbol) || (Date.now() - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS)) return;
 
   const emoji = best.direction === "LONG" ? "🚀" : "🪂";
+  const msg = `⚡ JTF DISCOVERY v2.0 ⚡\n\n${emoji} ${best.symbol} — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Prix: ${best.price}\n💠 Entry: ${best.limitEntry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔒 Secure BE: ${best.bePrice}\n⚖️ Levier: ${best.levier}`;
 
-  const msg =
-    `⚡ JTF DISCOVERY v1.9 ⚡
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: "Markdown" })
+  }).catch(() => { });
 
-${emoji} ${best.symbol} — ${best.direction}
-🏅 Score: ${best.score}
-
-💰 Prix actuel: ${best.price}
-💠 Entry (limit): ${best.limitEntry}
-🎁 TP Partiel (50%): ${best.partialTP} (1R)
-🎯 TP Final: ${best.tp}
-🛑 SL: ${best.sl}
-🔒 Sécurisation (SL → BE) @ ${best.bePrice}
-⚖️ Levier suggéré: ${best.levier}
-
-📊 Vol Spike: x${best.volRatio}
-🌡️ Vola24: ${best.vola}%
-📘 Orderbook: ${best.obRatio}`;
-
-  await sendTelegram(msg);
-  lastGlobalTradeTime = now;
-
-  // Enregistrer le signal dans le registre global
+  lastGlobalTradeTime = Date.now();
   registerSignal("DISCOVERY", best.symbol, best.direction);
 }
 
-// ========= MAIN =========
 export async function startDiscovery() {
-  console.log("🔥 DISCOVERY v1.9 On");
-  await sendTelegram("🟢 DISCOVERY v1.9 On");
+  console.log("🔥 DISCOVERY v2.0 On");
   while (true) {
-    try {
-      await scanDiscovery();
-    } catch (e) {
-      console.log("[DISCOVERY ERROR]", e);
-    }
+    try { await scanDiscovery(); } catch (e) { console.log("[DISCOVERY ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
