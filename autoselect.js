@@ -190,20 +190,27 @@ async function scanOnce() {
   const snapshots = [];
   for (const s of SYMBOLS) {
     const res = await processSymbol(s);
-    if (res) snapshots.push(res);
+    if (res) {
+      logDebug(`Snapshot for ${s}: MMS_L=${res.MMS_long.toFixed(1)}, MMS_S=${res.MMS_short.toFixed(1)}`);
+      snapshots.push(res);
+    }
     await sleep(500);
   }
 
   const candidates = [];
   for (const rec of snapshots) {
     const fusion = fuseJDS(rec, marketContext);
+    logDebug(`${rec.symbol} -> Fusion: ${fusion.direction}, Score: ${fusion.jds.toFixed(1)}`);
 
     // 🎯 Clipping @ 95 (Phase 3 optimization)
     let score = Math.min(fusion.jds, 95);
     if (score < 80) continue;
 
-    if (shouldSkipDirection(fusion.direction)) continue;
-    if (isRecentlySignaled(rec.symbol, 45 * 60_000)) continue; // Plus d'espace entre signaux Majors
+    if (shouldSkipDirection(fusion.direction)) {
+      logDebug(`[MAJORS SKIP] ${rec.symbol} — Direction ${fusion.direction} skipped by bias config`);
+      continue;
+    }
+    if (isRecentlySignaled(rec.symbol, 45 * 60_000)) continue;
 
     // 🎯 Advanced Filters (Orderbook/Funding)
     const adv = await applyAdvancedFilters(rec.symbol, fusion.direction, score);
@@ -216,6 +223,8 @@ async function scanOnce() {
     const plan = buildTradePlan(rec, fusion, 1.6);
     candidates.push({ symbol: rec.symbol, direction: fusion.direction, score, plan, rec });
   }
+
+  console.log(`📊 [MAJORS] Scan Summary: ${snapshots.length} symbols analyzed, ${candidates.length} candidates found.`);
 
   const selected = candidates.sort((a, b) => b.score - a.score).slice(0, MAX_SIGNALS_PER_SCAN);
   if (!selected.length) return;
