@@ -225,12 +225,17 @@ async function scanDegen() {
   for (let i = 0; i < DEGEN_SYMBOLS.length; i += 5) {
     const results = await Promise.all(DEGEN_SYMBOLS.slice(i, i + 5).map(s => processDegen(s)));
     for (const r of results) {
+      if (!r) continue;
       const s = await analyzeCandidate(r, marketContext);
-      if (s) candidates.push(s);
+      if (s) {
+        logDebug(`[DEGEN CANDIDATE] ${s.symbol} - Score: ${s.score.toFixed(1)}`);
+        candidates.push(s);
+      }
     }
     await sleep(200);
   }
 
+  console.log(`📊 [DEGEN] Scan Summary: ${candidates.length} potential setups found out of ${DEGEN_SYMBOLS.length} symbols.`);
   if (!candidates.length) return;
   const best = candidates.sort((a, b) => b.score - a.score)[0];
   if (isRecentlySignaled(best.symbol) || (Date.now() - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS)) return;
