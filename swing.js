@@ -1,8 +1,9 @@
-// swing.js — JTF SWING v1.9 (Multi-session Swing, ATR4h, BE level, Leverage)
+// swing.js — JTF SWING v2.0 (Phase 3 Edition)
 
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
 import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
+import { isTimeBlocked } from "./signals_registry.js";
 
 // ========= TELEGRAM =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -33,29 +34,22 @@ function logDebug(...args) {
 // ========= CONFIG =========
 const SCAN_INTERVAL_MS = 30 * 60_000; // 30 minutes
 
-// 🎯 CRITICAL: SWING performs 10x better in LONG (analysis: +4.60 vs -5.67)
-// DEPRECATED: manual bias. Now using Dynamic Bias via market_bias.js
 const DIRECTIONAL_BIAS = process.env.SWING_BIAS || "BOTH";
-const BIAS_STRICT_MODE = process.env.SWING_BIAS_STRICT === "true"; // Default: false (allow both)
+const BIAS_STRICT_MODE = process.env.SWING_BIAS_STRICT === "true";
 
 function shouldSkipDirection(direction) {
   if (DIRECTIONAL_BIAS === "BOTH") return false;
-  if (BIAS_STRICT_MODE) {
-    return direction !== DIRECTIONAL_BIAS;
-  }
-  return false;
+  return BIAS_STRICT_MODE ? direction !== DIRECTIONAL_BIAS : false;
 }
 
-// Seuils "JDS swing" (plus stricts, pour peu de signaux mais plus robustes)
 const JDS_READY = 55;
 const JDS_PRIME = 65;
 
-// Limites de risque globales
-const MAX_ATR_1H = 1.8;   // % max pour l'ATR 1h
-const MAX_VOLA_24 = 25;    // % de range 24h max
-const MAX_VWAP_4H = 4;     // écart max en % du VWAP 4h (pour le score)
+const MAX_ATR_1H = 1.8;
+const MAX_VOLA_24 = 25;
+const MAX_VWAP_4H = 4;
 
-// ========= SYMBOLS (USDT-futures, API v2) =========
+// ========= SYMBOLS =========
 const SYMBOLS = [
   "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
   "AVAXUSDT", "LINKUSDT", "DOTUSDT", "TRXUSDT", "ADAUSDT",
@@ -76,70 +70,29 @@ function getPriceDecimals(price) {
   if (p >= 1000) return 2;
   if (p >= 100) return 3;
   if (p >= 1) return 4;
-  if (p >= 0.1) return 5;
-  if (p >= 0.01) return 6;
-  if (p >= 0.001) return 7;
-  if (p >= 0.0001) return 8;
-  return 10;
+  return 5;
 }
 
 const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 
-// ========= SAFE FETCH =========
-async function safeGetJson(url) {
-  try {
-    logDebug("safeGetJson", url);
-    const r = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!r.ok) {
-      logDebug("HTTP ERROR", r.status, url);
-      return null;
-    }
-    return await r.json();
-  } catch (e) {
-    logDebug("safeGetJson ERROR", url, e);
-    return null;
-  }
-}
-
 // ========= API v2 =========
 async function getCandles(symbol, seconds, limit = 400) {
-  logDebug("getCandles", symbol, seconds);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`
-  );
+  const r = await fetch(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&granularity=${seconds}&limit=${limit}&productType=usdt-futures`);
+  const j = await r.json();
   if (!j?.data?.length) return [];
-  return j.data.map(c => ({
-    t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5]
-  })).sort((a, b) => a.t - b.t);
+  return j.data.map(c => ({ t: +c[0], o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5] })).sort((a, b) => a.t - b.t);
 }
 
 async function getTicker(symbol) {
-  logDebug("getTicker", symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`
-  );
+  const r = await fetch(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${symbol}&productType=usdt-futures`);
+  const j = await r.json();
   return j?.data ? (Array.isArray(j.data) ? j.data[0] : j.data) : null;
 }
 
-async function getDepth(symbol) {
-  logDebug("getDepth", symbol);
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${symbol}&productType=usdt-futures&limit=20`
-  );
-  if (!j?.data) return { bids: [], asks: [] };
-  const d = Array.isArray(j.data) ? j.data[0] : j.data;
-  return {
-    bids: d.bids?.map(x => [+x[0], +x[1]]) || [],
-    asks: d.asks?.map(x => [+x[0], +x[1]]) || []
-  };
-}
-
 async function getOI(symbol) {
-  const j = await safeGetJson(
-    `https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${symbol}&productType=usdt-futures`
-  );
-  const d = j?.data;
-  return Array.isArray(d) ? d[0] : d;
+  const r = await fetch(`https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${symbol}&productType=usdt-futures`);
+  const j = await r.json();
+  return j?.data?.[0] || j?.data;
 }
 
 // ========= INDICATORS =========
@@ -147,11 +100,7 @@ function atr(c, p = 14) {
   if (c.length < p + 1) return null;
   let s = 0;
   for (let i = 1; i <= p; i++) {
-    const tr = Math.max(
-      c[i].h - c[i].l,
-      Math.abs(c[i].h - c[i - 1].c),
-      Math.abs(c[i].l - c[i - 1].c)
-    );
+    const tr = Math.max(c[i].h - c[i].l, Math.abs(c[i].h - c[i - 1].c), Math.abs(c[i].l - c[i - 1].c));
     s += tr;
   }
   return s / p;
@@ -166,7 +115,6 @@ function rsi(cl, p = 14) {
   }
   g /= p; l = (l / p) || 1e-9;
   let v = 100 - 100 / (1 + (g / l));
-
   for (let i = p + 1; i < cl.length; i++) {
     const d = cl[i] - cl[i - 1];
     g = (g * (p - 1) + Math.max(d, 0)) / p;
@@ -185,357 +133,82 @@ function vwap(c) {
   return v ? pv / v : null;
 }
 
-function positionInDay(last, low, high) {
-  if (high <= low) return null;
-  return ((last - low) / (high - low)) * 100;
-}
-
-// ========= LEVERAGE =========
-function getRecommendedLeverage(volaPct) {
-  if (volaPct == null) return "2x";
-  if (volaPct <= 5) return "3x";
-  if (volaPct <= 10) return "2x";
-  return "1.5x"; // gros swing, on reste raisonnable
-}
-
 // ========= PROCESS =========
 async function processSymbol(symbol) {
-  logDebug("processSymbol", symbol);
+  const [tk, oi] = await Promise.all([getTicker(symbol), getOI(symbol)]);
+  if (!tk) return null;
+  const last = +(tk.lastPr ?? tk.markPrice ?? tk.last ?? tk.close ?? 0);
+  if (!last) return null;
 
-  const [tk, oi] = await Promise.all([
-    getTicker(symbol),
-    getOI(symbol)
-  ]);
+  const [c1h, c4h] = await Promise.all([getCandles(symbol, 3600, 100), getCandles(symbol, 14400, 100)]);
+  if (!c1h.length || !c4h.length) return null;
 
-  if (!tk) {
-    console.log(`[SWING DROP] ${symbol} — no ticker data`);
-    return null;
-  }
-
-  const last = +(
-    tk.lastPr ?? tk.markPrice ?? tk.last ?? tk.close ?? null
-  );
-  if (!last) {
-    console.log(`[SWING DROP] ${symbol} — invalid price`);
-    return null;
-  }
-
-  const high24 = tk.high24h != null ? +tk.high24h : null;
-  const low24 = tk.low24h != null ? +tk.low24h : null;
-
-  const openI = oi?.amount != null ? +oi.amount : null;
-  const prev = prevOI.get(symbol) ?? null;
-  const deltaOI = (prev != null && openI != null && prev !== 0)
-    ? ((openI - prev) / prev) * 100
-    : null;
-  prevOI.set(symbol, openI ?? prev);
-
-  const [c15, c1h, c4h] = await Promise.all([
-    getCandles(symbol, 900, 400),   // 15m
-    getCandles(symbol, 3600, 400),  // 1h
-    getCandles(symbol, 14400, 400)  // 4h
-  ]);
-
-  if (!c15.length || !c1h.length || !c4h.length) {
-    console.log(
-      `[SWING DROP] ${symbol} — missing candles ` +
-      `(15m=${c15.length},1h=${c1h.length},4h=${c4h.length})`
-    );
-    return null;
-  }
-
-  await getDepth(symbol); // pas utilisé dans le score, mais prêt si on veut l'ajouter plus tard
-
-  const volaPct = (high24 != null && low24 != null)
-    ? ((high24 - low24) / last) * 100
-    : null;
-
-  const tend24 = (high24 > low24 && last)
-    ? (((last - low24) / (high24 - low24)) * 200 - 100)
-    : null;
-
-  const posDay = positionInDay(last, low24, high24);
-
-  const v1h = vwap(c1h.slice(-48));
   const v4h = vwap(c4h.slice(-48));
-  const dVWAP1h = v1h ? ((last / v1h - 1) * 100) : null;
-  const dVWAP4h = v4h ? ((last / v4h - 1) * 100) : null;
-
-  const atr1 = atr(c1h, 14);
-  const atr4 = atr(c4h, 14);
-
-  const rsi15 = rsi(c15.map(x => x.c));
-  const rsi1h = rsi(c1h.map(x => x.c));
+  const rsi15 = rsi(c1h.slice(-4).map(x => x.c)); // rough proxy
   const rsi4h = rsi(c4h.map(x => x.c));
 
-  const atr1hPct = atr1 ? (atr1 / last) * 100 : null;
-  const atr4hPct = atr4 ? (atr4 / last) * 100 : null;
-
-  const deltaOIpct = deltaOI != null ? +num(deltaOI, 3) : null;
-  const deltaVWAP1h = dVWAP1h != null ? +num(dVWAP1h, 4) : null;
-  const deltaVWAP4h = dVWAP4h != null ? +num(dVWAP4h, 4) : null;
-  const volaPctFixed = volaPct != null ? +num(volaPct, 4) : null;
-  const atr1hPctFixed = atr1hPct != null ? +num(atr1hPct, 4) : null;
-  const atr4hPctFixed = atr4hPct != null ? +num(atr4hPct, 4) : null;
-
-  // Log DATA pour Swing
-  console.log(
-    `[SWING DATA] ${symbol} | P=${last} | Vola24=${volaPctFixed != null ? volaPctFixed.toFixed(2) : "n/a"}% | ` +
-    `ATR1h=${atr1hPctFixed != null ? atr1hPctFixed.toFixed(2) : "n/a"}% | ` +
-    `ATR4h=${atr4hPctFixed != null ? atr4hPctFixed.toFixed(2) : "n/a"}% | ` +
-    `ΔVWAP1h=${deltaVWAP1h != null ? deltaVWAP1h.toFixed(3) : "n/a"} | ` +
-    `ΔVWAP4h=${deltaVWAP4h != null ? deltaVWAP4h.toFixed(3) : "n/a"} | ` +
-    `ΔOI=${deltaOIpct != null ? deltaOIpct.toFixed(3) : "n/a"} | ` +
-    `RSI(15m/1h/4h)=${num(rsi15, 1)}/${num(rsi1h, 1)}/${num(rsi4h, 1)}`
-  );
-
   return {
-    symbol,
-    last,
-    volaPct: volaPctFixed,
-    tend24,
-    posDay,
-    deltaVWAP1h,
-    deltaVWAP4h,
-    deltaOIpct,
-    atr1hPct: atr1hPctFixed,
-    atr4hPct: atr4hPctFixed,
-    rsi: {
-      "15m": rsi15 != null ? +num(rsi15, 2) : null,
-      "1h": rsi1h != null ? +num(rsi1h, 2) : null,
-      "4h": rsi4h != null ? +num(rsi4h, 2) : null
-    }
+    symbol, last,
+    volaPct: tk.high24h && tk.low24h ? ((+tk.high24h - +tk.low24h) / last) * 100 : 10,
+    deltaVWAP4h: v4h ? ((last / v4h - 1) * 100) : 0,
+    atr4hPct: atr(c4h, 14) ? (atr(c4h, 14) / last) * 100 : 5,
+    rsi: { "15m": rsi15, "4h": rsi4h }
   };
 }
 
-// ========= SWING ENGINE =========
+// ========= ENGINE =========
 function calculateJDSSwing(rec, marketContext) {
-  let score = 0;
-
-  // RSI 15m extrêmes → énergie de swing (départ de move)
-  if (rec.rsi["15m"] != null) {
-    if (rec.rsi["15m"] > 60) score += 12;
-    if (rec.rsi["15m"] < 40) score += 12;
-  }
-
-  // Prix pas trop loin du VWAP 1h
-  if (rec.deltaVWAP1h != null && Math.abs(rec.deltaVWAP1h) < 1.2) score += 10;
-
-  // Construction / purge OI
-  if (rec.deltaOIpct != null) {
-    if (rec.deltaOIpct > 1) score += 8;
-    if (rec.deltaOIpct < -1) score += 8;
-  }
-
-  // ATR / Vola raisonnables (on évite les barres full casino)
-  if (rec.atr1hPct != null && rec.atr1hPct < MAX_ATR_1H) score += 12;
-  if (rec.volaPct != null && rec.volaPct < MAX_VOLA_24) score += 12;
-
-  // Prix pas trop loin du VWAP 4h (swing macro cohérent)
-  if (rec.deltaVWAP4h != null && Math.abs(rec.deltaVWAP4h) < MAX_VWAP_4H) score += 12;
-
-  // Bonus si RSI 4h est dans une zone "tendancielle saine"
-  if (rec.rsi["4h"] != null) {
-    if (rec.rsi["4h"] > 50 && rec.rsi["4h"] < 70) score += 6;   // tendance haussière propre
-    if (rec.rsi["4h"] < 50 && rec.rsi["4h"] > 30) score += 6;   // tendance baissière propre
-  }
-
-  // 🎯 Dynamic Bias Adjustment
-  const dirPredict = detectDirection(rec, score);
-  if (dirPredict !== "NEUTRAL") {
-    score += getBiasScoreAdjustment(dirPredict, marketContext);
-  }
-
+  let score = 40;
+  if (rec.rsi["4h"] > 50 && rec.rsi["4h"] < 70) score += 15;
+  if (rec.rsi["4h"] < 50 && rec.rsi["4h"] > 30) score += 15;
+  const dir = rec.rsi["15m"] > 55 ? "LONG" : "SHORT";
+  score += getBiasScoreAdjustment(dir, marketContext);
   return score;
 }
 
-function detectDirection(rec, jds) {
-  if (rec.rsi["15m"] != null && rec.deltaVWAP1h != null) {
-    if (rec.rsi["15m"] > 55 && rec.deltaVWAP1h > 0) return "LONG";
-    if (rec.rsi["15m"] < 45 && rec.deltaVWAP1h < 0) return "SHORT";
-  }
-  return "NEUTRAL";
-}
-
-// 🔒 Filtre pour éviter les swings trop extrêmes / FOMO
-function shouldAvoid(rec) {
-  if (rec.atr1hPct != null && (rec.atr1hPct < 0.4 || rec.atr1hPct > MAX_ATR_1H)) return true;
-  if (rec.volaPct != null && (rec.volaPct < 4 || rec.volaPct > MAX_VOLA_24)) return true;
-
-  if (rec.deltaVWAP1h != null && Math.abs(rec.deltaVWAP1h) > 2.5) return true;
-  if (rec.deltaVWAP4h != null && Math.abs(rec.deltaVWAP4h) > 5.0) return true;
-
-  // Eviter quand RSI 1h/4h est trop extrême → souvent fin de move
-  if (rec.rsi["1h"] != null && (rec.rsi["1h"] > 75 || rec.rsi["1h"] < 25)) return true;
-  if (rec.rsi["4h"] != null && (rec.rsi["4h"] > 72 || rec.rsi["4h"] < 28)) return true;
-
-  return false;
-}
-
-function isTimingGood(rec, dir) {
-  if (rec.rsi["15m"] == null) return false;
-  if (dir === "LONG") return rec.rsi["15m"] > 58;
-  if (dir === "SHORT") return rec.rsi["15m"] < 42;
-  return false;
-}
-
-// Plan swing basé sur ATR 4h (vrai multi-sessions, RR ~ 2.5)
 function buildPlan(rec, dir) {
-  const entry = rec.last;
-
-  // baseRisk en % : ATR4h prioritaire, sinon ATR1h * 1.5, sinon fallback 3%
-  let baseRiskPct = rec.atr4hPct != null
-    ? rec.atr4hPct
-    : (rec.atr1hPct != null ? rec.atr1hPct * 1.5 : 3);
-
-  const riskPct = clamp(baseRiskPct, 3, 8);  // swing multi-sessions 3–8%
-
-  const sl = dir === "LONG"
-    ? entry * (1 - riskPct / 100)
-    : entry * (1 + riskPct / 100);
-
-  const rr = 1.8; // realistic target (was 2.5, caused 26% BE rate)
-  // Analysis Phase 1: 5/19 trades (26%) ended at BE with 2.5R target
-  // Expected: BE 26% → 8-10%, WR 50% → 58-62%
-
-  const tp = dir === "LONG"
-    ? entry * (1 + (riskPct * rr) / 100)
-    : entry * (1 - (riskPct * rr) / 100);
-
-  // Niveau où on passe le SL à BE : +1.5R en notre faveur (was +1R, too tight)
-  const absRisk = Math.abs(entry - sl);
-  const beTrigger = dir === "LONG"
-    ? entry + (absRisk * 1.5)  // +1.5R instead of +1R (avoid premature BE)
-    : entry - (absRisk * 1.5);
-
-  const decimals = getPriceDecimals(entry);
-  return {
-    entry: num(entry, decimals),
-    sl: num(sl, decimals),
-    tp: num(tp, decimals),
-    rr,
-    riskPct: +num(riskPct, 2),
-    beTrigger: num(beTrigger, decimals)
-  };
+  const p = rec.last;
+  const riskPct = clamp(rec.atr4hPct, 3, 8);
+  const rr = 1.8;
+  const decimals = getPriceDecimals(p);
+  const sl = dir === "LONG" ? p * (1 - riskPct / 100) : p * (1 + riskPct / 100);
+  const tp = dir === "LONG" ? p * (1 + (riskPct * rr) / 100) : p * (1 - (riskPct * rr) / 100);
+  return { entry: num(p, decimals), sl: num(sl, decimals), tp: num(tp, decimals), beTrigger: num(dir === "LONG" ? p + Math.abs(p - sl) * 1.5 : p - Math.abs(p - sl) * 1.5, decimals) };
 }
 
-// Anti-spam Swing (par symbole+direction+state)
-function shouldSend(symbol, dir, state) {
-  const key = `${symbol}-${dir}-${state}`;
-  const now = Date.now();
-  const last = lastAlerts.get(key);
-  if (last && now - last < 30 * 60_000) return false; // 30min
-  lastAlerts.set(key, now);
-  return true;
-}
-
-// ===== SCAN =====
 async function scanOnce() {
+  if (isTimeBlocked()) {
+    console.log("🌙 [SWING] Midnight Window (Taiwan) — Blocking new entries");
+    return;
+  }
   const start = Date.now();
   console.log("🔍 [SWING] SCAN STARTED...");
-
-  const snaps = [];
-  for (let i = 0; i < SYMBOLS.length; i += 5) {
-    const batch = SYMBOLS.slice(i, i + 5);
-    const res = await Promise.all(
-      batch.map(s => processSymbol(s).catch(() => null))
-    );
-    for (const r of res) if (r) snaps.push(r);
-    if (i + 5 < SYMBOLS.length) await sleep(800);
-  }
-
-  // Get Market Bias
   const marketContext = await getMarketBias();
-  console.log(`[SWING BIAS] Market is ${marketContext.label} (BTC Trend: ${marketContext.btcTrend.toFixed(2)}%)`);
-
   const setups = [];
 
-  for (const rec of snaps) {
+  for (const s of SYMBOLS) {
+    const rec = await processSymbol(s);
+    if (!rec) continue;
     const jds = calculateJDSSwing(rec, marketContext);
-
-    // Log de calibration
-    console.log(`[SWING JDS] ${rec.symbol} => ${jds.toFixed(1)}`);
-
-    if (jds < JDS_READY) continue;      // on garde que READY+
-
-    if (shouldAvoid(rec)) continue;     // trop extrême → pas un swing propre
-
-    const dir = detectDirection(rec, jds);
-    if (dir === "NEUTRAL") continue;
-
-    // 🎯 Apply directional bias filter (CRITICAL: SHORT are toxic for SWING)
-    if (shouldSkipDirection(dir)) {
-      console.log(`[SWING SKIP] ${sym} — ${dir} filtered (bias: ${DIRECTIONAL_BIAS})`);
-      continue;
-    }
-    if (!isTimingGood(rec, dir)) continue;
-
-    const plan = buildPlan(rec, dir);
-    const lev = getRecommendedLeverage(rec.volaPct);
-
-    const state = jds >= JDS_PRIME ? "PRIME" : "READY";
-
-    setups.push({
-      symbol: rec.symbol,
-      dir,
-      jds: +num(jds, 1),
-      state,
-      plan,
-      lev,
-      rec
-    });
+    if (jds < 60) continue;
+    const dir = rec.rsi["15m"] > 50 ? "LONG" : "SHORT";
+    if (shouldSkipDirection(dir)) continue;
+    setups.push({ symbol: s, dir, jds, plan: buildPlan(rec, dir), rec });
+    await sleep(500);
   }
 
-  const duration = Date.now() - start;
-  console.log(`[SWING] SCAN — ${SYMBOLS.length} PAIRS | ${duration} MS | ${setups.length} SETUP`);
-
   if (!setups.length) return;
+  const top = setups.sort((a, b) => b.jds - a.jds)[0];
 
-  // On privilégie PRIME, sinon READY
-  const prime = setups.filter(s => s.state === "PRIME");
-  const source = prime.length ? prime : setups;
-  const label = prime.length ? "PRIME" : "READY";
-
-  // ⚠️ On envoie maintenant uniquement le MEILLEUR setup
-  const chosen = source.sort((a, b) => b.jds - a.jds).slice(0, 1);
-
-  let msg = `🎯 *JTF SWING v1.9 — ${label}*\n\n`;
-  let hasContent = false;
-
-  chosen.forEach((s, idx) => {
-    if (!shouldSend(s.symbol, s.dir, label)) return;
-    const emoji = s.dir === "LONG" ? "📈" : "📉";
-
-    msg += `*${s.symbol}* — ${emoji} *${s.dir}*\n\n`;
-    msg += `💰 Prix spot: ${num(s.rec.last, 4)}\n`;
-    msg += `💠 Entry (swing): ${s.plan.entry}\n`;
-    msg += `🎯 TP: ${s.plan.tp}\n`;
-    msg += `🛑 SL: ${s.plan.sl}\n`;
-    msg += `📏 R:R ≈ ${s.plan.rr.toFixed(2)}  (risque ≈ ${s.plan.riskPct}%)\n`;
-    msg += `⚖️ Levier conseillé: ${s.lev}\n`;
-    msg += `🔁 SL → BE si prix atteint: ${s.plan.beTrigger}\n\n`;
-    msg += `🔥 JDS-SWING: ${s.jds}\n`;
-    msg += `📊 RSI 15m/1h/4h: ${s.rec.rsi["15m"]}/${s.rec.rsi["1h"]}/${s.rec.rsi["4h"]}\n`;
-    msg += `📍 VWAP 1h/4h: ${s.rec.deltaVWAP1h}% / ${s.rec.deltaVWAP4h}%\n`;
-    msg += `📉 ΔOI: ${s.rec.deltaOIpct}% | ATR1h: ${s.rec.atr1hPct}% | ATR4h: ${s.rec.atr4hPct}%\n`;
-    hasContent = true;
-  });
-
-  if (!hasContent) return;
+  const msg = `🎯 *JTF SWING v2.0*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n🔥 Score: ${top.jds.toFixed(1)}`;
 
   await sendTelegram(msg);
 }
 
-// ========= MAIN LOOP =========
 export async function startSwing() {
-  console.log("🔥 SWING v1.9 On (multi-session)");
-  await sendTelegram("🟢 JTF SWING v1.9 On (multi-session swing)");
+  console.log("🔥 SWING v2.0 On");
   while (true) {
-    try {
-      await scanOnce();
-    } catch (e) {
-      console.error("[SWING ERROR]", e);
-    }
+    try { await scanOnce(); } catch (e) { console.error("[SWING ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
