@@ -222,12 +222,17 @@ async function scanDiscovery() {
     const batch = DISCOVERY_SYMBOLS.slice(i, i + 5);
     const res = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res) {
+      if (!r) continue;
       const s = await analyzeDiscovery(r, marketContext);
-      if (s) signals.push(s);
+      if (s) {
+        logDebug(`[DISCOVERY CANDIDATE] ${s.symbol} - Score: ${s.score.toFixed(1)}`);
+        signals.push(s);
+      }
     }
     await sleep(200);
   }
 
+  console.log(`📊 [DISCOVERY] Scan Summary: ${signals.length} potential setups found out of ${DISCOVERY_SYMBOLS.length} symbols.`);
   if (!signals.length) return;
   const best = signals.sort((a, b) => b.score - a.score)[0];
 
