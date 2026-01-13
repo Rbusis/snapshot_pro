@@ -20,6 +20,19 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const SCAN_INTERVAL_MS = 5 * 60_000;
 
+async function sendTelegram(msg) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: "Markdown" })
+    });
+  } catch (e) {
+    console.error("[TELEGRAM ERROR]", e);
+  }
+}
+
 const DIRECTIONAL_BIAS = process.env.DISCOVERY_BIAS || "BOTH";
 const BIAS_STRICT_MODE = process.env.DISCOVERY_BIAS_STRICT === "true";
 
@@ -223,6 +236,7 @@ async function scanDiscovery() {
     const res = await Promise.all(batch.map(s => processDiscovery(s)));
     for (const r of res) {
       if (!r) continue;
+      logDebug(`Analyzing ${r.symbol}: VolRatio=${r.volRatio.toFixed(1)}, Gap=${Math.abs(r.priceVsVwap).toFixed(2)}%, Vola=${r.volaPct.toFixed(1)}%`);
       const s = await analyzeDiscovery(r, marketContext);
       if (s) {
         logDebug(`[DISCOVERY CANDIDATE] ${s.symbol} - Score: ${s.score.toFixed(1)}`);
@@ -252,6 +266,7 @@ async function scanDiscovery() {
 
 export async function startDiscovery() {
   console.log("🔥 DISCOVERY v2.0 On");
+  await sendTelegram("🟢 JTF DISCOVERY v2.0 On");
   while (true) {
     try { await scanDiscovery(); } catch (e) { console.log("[DISCOVERY ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
