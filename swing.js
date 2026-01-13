@@ -190,6 +190,7 @@ async function scanOnce() {
     const rec = await processSymbol(s);
     if (!rec) continue;
     const jds = calculateJDSSwing(rec, marketContext);
+    logDebug(`${s} -> JDS: ${jds.toFixed(1)}`);
     if (jds < 60) continue;
     const dir = rec.rsi["15m"] > 50 ? "LONG" : "SHORT";
     if (shouldSkipDirection(dir)) continue;
@@ -197,6 +198,7 @@ async function scanOnce() {
     await sleep(500);
   }
 
+  console.log(`📊 [SWING] Scan Summary: ${SYMBOLS.length} symbols analyzed, ${setups.length} setups found.`);
   if (!setups.length) return;
   const top = setups.sort((a, b) => b.jds - a.jds)[0];
 
