@@ -163,11 +163,11 @@ async function analyzeDiscovery(rec, marketContext) {
   if (!rec) return null;
 
   let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
-  if (rec.volRatio < (dir === "LONG" ? 1.8 : 1.5)) return null;
+  if (rec.volRatio < (dir === "LONG" ? 2.0 : 1.7)) return null;
   if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 30) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  const [gapMin, gapMax] = dir === "LONG" ? [0.2, 2.5] : [0.4, 3.5];
+  const [gapMin, gapMax] = dir === "LONG" ? [0.3, 2.5] : [0.5, 3.5];
   if (gap < gapMin || gap > gapMax) return null;
 
   if (dir === "LONG") {
@@ -187,7 +187,7 @@ async function analyzeDiscovery(rec, marketContext) {
     console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 95 is too risky`);
     return null;
   }
-  if (score < 70) return null;
+  if (score < 75) return null;
 
   // 🎯 Advanced Filters (Orderbook/Funding)
   const adv = await applyAdvancedFilters(rec.symbol, dir, score);
