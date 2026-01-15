@@ -163,22 +163,22 @@ async function analyzeDiscovery(rec, marketContext) {
   if (!rec) return null;
 
   let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
-  if (rec.volRatio < (dir === "LONG" ? 2.4 : 2.0)) return null;
-  if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 22) return null;
+  if (rec.volRatio < (dir === "LONG" ? 1.8 : 1.5)) return null;
+  if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 30) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  const [gapMin, gapMax] = dir === "LONG" ? [0.3, 1.8] : [0.6, 3.2];
+  const [gapMin, gapMax] = dir === "LONG" ? [0.2, 2.5] : [0.4, 3.5];
   if (gap < gapMin || gap > gapMax) return null;
 
   if (dir === "LONG") {
-    if (rec.wicks.upper > 2.0 || rec.change24 < -2) return null;
+    if (rec.wicks.upper > 2.0 || rec.change24 < -5) return null;
   } else {
     if (rec.wicks.lower > 1.2) return null;
   }
 
   let score = 0;
-  score += rec.volRatio >= 3 ? 30 : 15;
-  score += (gap >= 1 && gap <= 2.2) ? 20 : 10;
+  score += rec.volRatio >= 2.5 ? 35 : 20;
+  score += (gap >= 0.8 && gap <= 2.5) ? 30 : 15;
   score += (dir === "LONG" ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 15 : 5) : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 15 : 5));
   score += getBiasScoreAdjustment(dir, marketContext);
 
@@ -187,7 +187,7 @@ async function analyzeDiscovery(rec, marketContext) {
     console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 95 is too risky`);
     return null;
   }
-  if (score < 80) return null;
+  if (score < 70) return null;
 
   // 🎯 Advanced Filters (Orderbook/Funding)
   const adv = await applyAdvancedFilters(rec.symbol, dir, score);
