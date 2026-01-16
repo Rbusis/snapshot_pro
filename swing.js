@@ -3,7 +3,7 @@
 import fetch from "node-fetch";
 import { DEBUG } from "./debug.js";
 import { getMarketBias, getBiasScoreAdjustment } from "./market_bias.js";
-import { isTimeBlocked } from "./signals_registry.js";
+import { isTimeBlocked, registerSignal, isRecentlySignaled } from "./signals_registry.js";
 
 // ========= TELEGRAM =========
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -133,38 +133,144 @@ function vwap(c) {
   return v ? pv / v : null;
 }
 
+function ema(c, p = 200) {
+  if (c.length < p) return null;
+  const k = 2 / (p + 1);
+  let v = c.slice(0, p).reduce((a, b) => a + b, 0) / p;
+  for (let i = p; i < c.length; i++) {
+    v = (c[i] - v) * k + v;
+  }
+  return v;
+}
+
+function mfi(c, p = 14) {
+  if (c.length < p + 1) return null;
+  const pmf = [], nmf = [];
+  for (let i = 1; i < c.length; i++) {
+    const tp_curr = (c[i].h + c[i].l + c[i].c) / 3;
+    const tp_prev = (c[i - 1].h + c[i - 1].l + c[i - 1].c) / 3;
+    const mf = tp_curr * c[i].v;
+    if (tp_curr > tp_prev) { pmf.push(mf); nmf.push(0); }
+    else if (tp_curr < tp_prev) { pmf.push(0); nmf.push(mf); }
+    else { pmf.push(0); nmf.push(0); }
+  }
+  if (pmf.length < p) return null;
+
+  let s_pmf = pmf.slice(-p).reduce((a, b) => a + b, 0);
+  let s_nmf = nmf.slice(-p).reduce((a, b) => a + b, 0);
+  if (s_nmf === 0) return 100;
+  return 100 - (100 / (1 + (s_pmf / s_nmf)));
+}
+
+function detectDivergence(prices, items) {
+  if (prices.length < 30 || items.length < 30) return null;
+
+  const lastP = prices[prices.length - 1];
+  const lastI = items[items.length - 1];
+
+  // Bulish: Low lower than previous low, Ind higher than previous low
+  // Bearish: High higher than previous high, Ind lower than previous high
+  // Simple check on last 10 candles vs previous 10-20
+  const p_prev = prices.slice(-20, -10);
+  const i_prev = items.slice(-20, -10);
+
+  const p_min_prev = Math.min(...p_prev);
+  const i_min_prev = Math.min(...i_prev);
+  const p_max_prev = Math.max(...p_prev);
+  const i_max_prev = Math.max(...i_prev);
+
+  if (lastP < p_min_prev && lastI > i_min_prev) return "BULLISH";
+  if (lastP > p_max_prev && lastI < i_max_prev) return "BEARISH";
+
+  return null;
+}
+
 // ========= PROCESS =========
 async function processSymbol(symbol) {
-  const [tk, oi] = await Promise.all([getTicker(symbol), getOI(symbol)]);
+  const [tk, currentOI] = await Promise.all([getTicker(symbol), getOI(symbol)]);
   if (!tk) return null;
   const last = +(tk.lastPr ?? tk.markPrice ?? tk.last ?? tk.close ?? 0);
   if (!last) return null;
 
-  const [c1h, c4h] = await Promise.all([getCandles(symbol, 3600, 100), getCandles(symbol, 14400, 100)]);
-  if (!c1h.length || !c4h.length) return null;
+  // Multi-timeframe: 1h, 4h, 1d
+  const [c1h, c4h, c1d] = await Promise.all([
+    getCandles(symbol, 3600, 100),
+    getCandles(symbol, 14400, 300),
+    getCandles(symbol, 86400, 30)
+  ]);
+  if (!c1h.length || !c4h.length || !c1d.length) return null;
 
   const v4h = vwap(c4h.slice(-48));
-  const rsi15 = rsi(c1h.slice(-4).map(x => x.c)); // rough proxy
+  const ema200 = ema(c4h.map(x => x.c), 200);
+
   const rsi4h = rsi(c4h.map(x => x.c));
+  const mfi4h = mfi(c4h.slice(-30));
+
+  // Divergence detection (4h)
+  const prices = c4h.slice(-30).map(x => x.c);
+  const rsiValues = c4h.slice(-30).map((_, i, arr) => rsi(c4h.slice(0, 270 + i).map(x => x.c))).slice(-30);
+  // Optimization: detectDivergence needs more history but we slice for simplicity here
+  const divRSI = detectDivergence(prices, rsiValues);
+
+  // OI Impulse
+  const oiVal = parseFloat(currentOI?.openInterest || currentOI || 0);
+  const prev = prevOI.get(symbol);
+  const oiImpulse = prev ? ((oiVal / prev) - 1) * 100 : 0;
+  prevOI.set(symbol, oiVal);
+
+  // Daily Trend
+  const dailyClose = c1d.map(x => x.c);
+  const dailyTrend = dailyClose[dailyClose.length - 1] > dailyClose[dailyClose.length - 2] ? "UP" : "DOWN";
 
   return {
     symbol, last,
     volaPct: tk.high24h && tk.low24h ? ((+tk.high24h - +tk.low24h) / last) * 100 : 10,
     deltaVWAP4h: v4h ? ((last / v4h - 1) * 100) : 0,
     atr4hPct: atr(c4h, 14) ? (atr(c4h, 14) / last) * 100 : 5,
-    rsi: { "15m": rsi15, "4h": rsi4h }
+    ema200,
+    dailyTrend,
+    oiImpulse,
+    divRSI,
+    rsi: { "1h": rsi(c1h.map(x => x.c)), "4h": rsi4h },
+    mfi: { "4h": mfi4h }
   };
 }
 
 // ========= ENGINE =========
 function calculateJDSSwing(rec, marketContext) {
-  let score = 40;
-  // Dynamic ranges for better captures
-  if (rec.rsi["4h"] >= 48 && rec.rsi["4h"] <= 72) score += 15;
-  else if (rec.rsi["4h"] >= 28 && rec.rsi["4h"] <= 52) score += 15;
+  let score = 20; // Lower base for Elite v3.1
 
-  const dir = rec.rsi["15m"] >= 50 ? "LONG" : "SHORT";
+  // 1. RSI 4h Alignment (+10)
+  if (rec.rsi["4h"] >= 45 && rec.rsi["4h"] <= 65) score += 10;
+
+  // 2. Daily Trend (+15)
+  const dir = rec.rsi["1h"] >= 50 ? "LONG" : "SHORT";
+  if (dir === "LONG" && rec.dailyTrend === "UP") score += 15;
+  if (dir === "SHORT" && rec.dailyTrend === "DOWN") score += 15;
+
+  // 3. EMA 200 Filter (+10)
+  if (rec.ema200) {
+    if (dir === "LONG" && rec.last > rec.ema200) score += 10;
+    if (dir === "SHORT" && rec.last < rec.ema200) score += 10;
+  }
+
+  // 4. MFI Elite (+15)
+  if (rec.mfi["4h"] != null) {
+    if (dir === "LONG" && rec.mfi["4h"] < 40) score += 15; // Money flow starting to reverse from oversold
+    if (dir === "SHORT" && rec.mfi["4h"] > 60) score += 15; // Money flow starting to reverse from overbought
+  }
+
+  // 5. Divergence Elite (+20)
+  if (rec.divRSI === (dir === "LONG" ? "BULLISH" : "BEARISH")) {
+    score += 20;
+  }
+
+  // 6. OI Impulse (+10)
+  if (rec.oiImpulse > 0.5) score += 10; // New money confirming the trend
+
+  // 7. Market Bias (+10/-10)
   score += getBiasScoreAdjustment(dir, marketContext);
+
   return score;
 }
 
@@ -189,13 +295,22 @@ async function scanOnce() {
   const setups = [];
 
   for (const s of SYMBOLS) {
+    if (isRecentlySignaled(s, 24 * 3600_000)) {
+      logDebug(`Skipping ${s} (Already signaled in last 24h)`);
+      continue;
+    }
+
     const rec = await processSymbol(s);
     if (!rec) continue;
+
     const jds = calculateJDSSwing(rec, marketContext);
-    logDebug(`${s} -> JDS: ${jds.toFixed(1)}`);
-    if (jds < 55) continue;
-    const dir = rec.rsi["15m"] >= 50 ? "LONG" : "SHORT";
+    logDebug(`${s} -> JDS: ${jds.toFixed(1)} (Daily: ${rec.dailyTrend}, RSI1h: ${rec.rsi["1h"]?.toFixed(1)})`);
+
+    if (jds < 65) continue; // v3.1 Elite requires 65+ for high conviction
+
+    const dir = rec.rsi["1h"] >= 50 ? "LONG" : "SHORT";
     if (shouldSkipDirection(dir)) continue;
+
     setups.push({ symbol: s, dir, jds, plan: buildPlan(rec, dir), rec });
     await sleep(500);
   }
@@ -204,14 +319,15 @@ async function scanOnce() {
   if (!setups.length) return;
   const top = setups.sort((a, b) => b.jds - a.jds)[0];
 
-  const msg = `🎯 *JTF SWING v2.0*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n🔥 Score: ${top.jds.toFixed(1)}`;
+  const msg = `🎯 *JTF SWING v3.1 Elite*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n🔥 Score: ${top.jds.toFixed(1)}\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI Impulse: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Divergence: ${top.rec.divRSI || "Aucune"}`;
 
   await sendTelegram(msg);
+  registerSignal("SWING", top.symbol, top.dir);
 }
 
 export async function startSwing() {
-  console.log("🔥 SWING v2.0 On");
-  await sendTelegram("🟢 JTF SWING v2.0 On");
+  console.log("🔥 SWING v3.1 Elite On");
+  await sendTelegram("🟢 JTF SWING v3.1 Elite On");
   while (true) {
     try { await scanOnce(); } catch (e) { console.error("[SWING ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
