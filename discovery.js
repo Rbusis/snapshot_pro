@@ -163,11 +163,11 @@ async function analyzeDiscovery(rec, marketContext) {
   if (!rec) return null;
 
   let dir = rec.priceVsVwap > 0 ? "LONG" : "SHORT";
-  if (rec.volRatio < (dir === "LONG" ? 2.0 : 1.7)) return null;
+  if (rec.volRatio < (dir === "LONG" ? 2.5 : 2.0)) return null;
   if (rec.volaPct == null || rec.volaPct < 3 || rec.volaPct > 30) return null;
 
   const gap = Math.abs(rec.priceVsVwap);
-  const [gapMin, gapMax] = dir === "LONG" ? [0.3, 2.5] : [0.5, 3.5];
+  const [gapMin, gapMax] = dir === "LONG" ? [0.5, 2.5] : [0.8, 3.5];
   if (gap < gapMin || gap > gapMax) return null;
 
   if (dir === "LONG") {
@@ -177,8 +177,8 @@ async function analyzeDiscovery(rec, marketContext) {
   }
 
   let score = 0;
-  score += rec.volRatio >= 2.5 ? 35 : 20;
-  score += (gap >= 0.8 && gap <= 2.5) ? 30 : 15;
+  score += rec.volRatio >= 3.5 ? 35 : 25;
+  score += (gap >= 1.0 && gap <= 2.5) ? 30 : 15;
   score += (dir === "LONG" ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 15 : 5) : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 15 : 5));
   score += getBiasScoreAdjustment(dir, marketContext);
 
@@ -187,7 +187,7 @@ async function analyzeDiscovery(rec, marketContext) {
     console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 95 is too risky`);
     return null;
   }
-  if (score < 75) return null;
+  if (score < 80) return null;
 
   // 🎯 Advanced Filters (Orderbook/Funding)
   const adv = await applyAdvancedFilters(rec.symbol, dir, score);
