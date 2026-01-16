@@ -159,9 +159,11 @@ async function processSymbol(symbol) {
 // ========= ENGINE =========
 function calculateJDSSwing(rec, marketContext) {
   let score = 40;
-  if (rec.rsi["4h"] > 50 && rec.rsi["4h"] < 70) score += 15;
-  if (rec.rsi["4h"] < 50 && rec.rsi["4h"] > 30) score += 15;
-  const dir = rec.rsi["15m"] > 55 ? "LONG" : "SHORT";
+  // Dynamic ranges for better captures
+  if (rec.rsi["4h"] >= 48 && rec.rsi["4h"] <= 72) score += 15;
+  else if (rec.rsi["4h"] >= 28 && rec.rsi["4h"] <= 52) score += 15;
+
+  const dir = rec.rsi["15m"] >= 50 ? "LONG" : "SHORT";
   score += getBiasScoreAdjustment(dir, marketContext);
   return score;
 }
@@ -191,8 +193,8 @@ async function scanOnce() {
     if (!rec) continue;
     const jds = calculateJDSSwing(rec, marketContext);
     logDebug(`${s} -> JDS: ${jds.toFixed(1)}`);
-    if (jds < 60) continue;
-    const dir = rec.rsi["15m"] > 50 ? "LONG" : "SHORT";
+    if (jds < 55) continue;
+    const dir = rec.rsi["15m"] >= 50 ? "LONG" : "SHORT";
     if (shouldSkipDirection(dir)) continue;
     setups.push({ symbol: s, dir, jds, plan: buildPlan(rec, dir), rec });
     await sleep(500);
