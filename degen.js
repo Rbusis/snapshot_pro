@@ -184,17 +184,17 @@ async function analyzeCandidate(rec, marketContext) {
   if (shouldSkipDirection(dir)) return null;
 
   let score = 0;
-  score += rec.volRatio >= 3.5 ? 32 : rec.volRatio >= 3 ? 26 : 18;
-  score += (gap >= 1 && gap <= 2.0 ? 22 : gap >= 0.8 && gap <= 2.4 ? 14 : 6);
-  score += (dir === "LONG" ? (rec.rsi5 >= 52 && rec.rsi5 <= 72 ? 18 : 8) : (rec.rsi5 >= 28 && rec.rsi5 <= 48 ? 18 : 8));
+  score += rec.volRatio >= 3.5 ? 35 : rec.volRatio >= 3 ? 28 : 20;
+  score += (gap >= 1 && gap <= 2.2 ? 25 : gap >= 0.7 && gap <= 2.5 ? 15 : 5);
+  score += (dir === "LONG" ? (rec.rsi5 >= 50 && rec.rsi5 <= 70 ? 20 : 10) : (rec.rsi5 >= 30 && rec.rsi5 <= 50 ? 20 : 10));
   score += getBiasScoreAdjustment(dir, marketContext);
 
   // 🎯 Score filters phase 3 (DEGEN Trap protection)
-  if (score > 94) {
-    console.log(`[DEGEN TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 94 is too dangerous`);
+  if (score > 96) {
+    console.log(`[DEGEN TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 96 is too dangerous`);
     return null;
   }
-  if (score < 80) return null;
+  if (score < 75) return null;
 
   // 🎯 Advanced Filters (Orderbook/Funding)
   const adv = await applyAdvancedFilters(rec.symbol, dir, score);
