@@ -47,7 +47,9 @@ const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 let DEGEN_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 let lastGlobalTradeTime = 0;
-const lastAlerts = new Map();
+// Map pour suivre les trades actifs : clef=symbol, valeur=timestamp
+const activeTrades = new Map();
+const TIME_LIMIT_MS = 45 * 60_000; // 45 minutes (Scalping strict)
 
 // ========= BLACKLIST (TOXIC) =========
 const IGNORE_LIST = [
@@ -264,13 +266,35 @@ async function scanDegen() {
 
   lastGlobalTradeTime = Date.now();
   registerSignal("DEGEN", best.symbol, best.direction);
+
+  // Enregistrement pour le suivi chrono
+  activeTrades.set(best.symbol, Date.now());
+}
+
+// ========= TIME LIMIT MONITOR =========
+async function checkTimeLimits() {
+  const now = Date.now();
+  for (const [symbol, entryTime] of activeTrades.entries()) {
+    if (now - entryTime >= TIME_LIMIT_MS) {
+      // Envoi alerte
+      const msg = `⚠️ *DEGEN TIME LIMIT* ⚠️\n\n⌛ *${symbol}* a dépassé 45 min.\n\n👉 *CLOSE NOW* (Si pas déjà fait).\nLa volatilité scalping est probablement finie.`;
+      await sendTelegram(msg);
+      console.log(`[DEGEN TIMER] Alert sent for ${symbol}`);
+
+      // On retire du monitoring pour ne pas spammer
+      activeTrades.delete(symbol);
+    }
+  }
 }
 
 export async function startDegen() {
   console.log("🔥 DEGEN v4.0 On");
   await sendTelegram("🟢 JTF DEGEN v4.0 On");
   while (true) {
-    try { await scanDegen(); } catch (e) { console.log("[DEGEN ERROR]", e); }
+    try {
+      await scanDegen();
+      await checkTimeLimits(); // Vérification des chronos à chaque cycle
+    } catch (e) { console.log("[DEGEN ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
