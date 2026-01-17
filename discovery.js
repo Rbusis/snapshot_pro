@@ -49,6 +49,9 @@ const SYMBOL_UPDATE_INTERVAL = 60 * 60_000;
 let DISCOVERY_SYMBOLS = [];
 let lastSymbolUpdate = 0;
 let lastGlobalTradeTime = 0;
+// Map pour suivre les trades actifs : clef=symbol, valeur=timestamp
+const activeTrades = new Map();
+const TIME_LIMIT_MS = 8 * 60 * 60_000; // 8 heures (Intraday complet)
 const lastAlerts = new Map();
 
 // ========= BLACKLIST (TOXIC) =========
@@ -302,13 +305,35 @@ async function scanDiscovery() {
 
   lastGlobalTradeTime = Date.now();
   registerSignal("DISCOVERY", best.symbol, best.direction);
+
+  // Enregistrement pour le suivi chrono
+  activeTrades.set(best.symbol, Date.now());
+}
+
+// ========= TIME LIMIT MONITOR =========
+async function checkTimeLimits() {
+  const now = Date.now();
+  for (const [symbol, entryTime] of activeTrades.entries()) {
+    if (now - entryTime >= TIME_LIMIT_MS) {
+      // Envoi alerte
+      const msg = `⚠️ *DISCOVERY TIME LIMIT* ⚠️\n\n⌛ *${symbol}* a dépassé 8 heures.\n\n👉 *CLOSE NOW* (Si pas déjà fait).\nLa session intraday est terminée.`;
+      await sendTelegram(msg);
+      console.log(`[DISCOVERY TIMER] Alert sent for ${symbol}`);
+
+      // On retire du monitoring pour ne pas spammer
+      activeTrades.delete(symbol);
+    }
+  }
 }
 
 export async function startDiscovery() {
   console.log("🔥 DISCOVERY v2.0 On");
   await sendTelegram("🟢 JTF DISCOVERY v2.0 On");
   while (true) {
-    try { await scanDiscovery(); } catch (e) { console.log("[DISCOVERY ERROR]", e); }
+    try {
+      await scanDiscovery();
+      await checkTimeLimits(); // Vérification des chronos à chaque cycle
+    } catch (e) { console.log("[DISCOVERY ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
