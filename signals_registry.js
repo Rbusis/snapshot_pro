@@ -1,7 +1,25 @@
 // signals_registry.js
-// Registre global pour éviter les doublons et la corrélation entre bots (Discovery, Degen, Swing, Majors)
+import fs from "fs";
+const REGISTRY_FILE = "./signals_history.json";
 
-const lastSignals = new Map();
+function loadHistory() {
+  try {
+    if (fs.existsSync(REGISTRY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf8"));
+      return new Map(Object.entries(data));
+    }
+  } catch (e) { console.error("[REGISTRY] Error loading history", e); }
+  return new Map();
+}
+
+function saveHistory(map) {
+  try {
+    const data = Object.fromEntries(map);
+    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data, null, 2));
+  } catch (e) { console.error("[REGISTRY] Error saving history", e); }
+}
+
+const lastSignals = loadHistory();
 
 // Fenêtre par défaut : 45 min (pour éviter la sur-exposition sur un même symbole)
 const GLOBAL_WINDOW_MS = 45 * 60_000;
@@ -12,6 +30,7 @@ export function registerSignal(source, symbol, direction) {
     direction,
     ts: Date.now()
   });
+  saveHistory(lastSignals);
 }
 
 export function isRecentlySignaled(symbol, windowMs = GLOBAL_WINDOW_MS) {
