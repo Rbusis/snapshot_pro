@@ -176,10 +176,40 @@ async function analyzeDiscovery(rec, marketContext) {
     if (rec.wicks.lower > 1.2) return null;
   }
 
+  // 🎯 SCORING LINEAIRE (v2.2) 🎯
+  // Finit les paliers brutaux. Chaque point de volume ou de % compte.
+
   let score = 0;
-  score += rec.volRatio >= 3.5 ? 40 : 25;
-  score += (gap >= 0.8 && gap <= 2.5) ? 30 : 15;
-  score += (dir === "LONG" ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 20 : 10) : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 20 : 10));
+
+  // 1. VOLUME (Le plus important)
+  // De x2.0 à x5.0 -> Donne de 20 à 50 points.
+  // Formule : VolumeRatio * 10 (Borné entre 20 et 50)
+  const volScore = Math.min(Math.max(rec.volRatio * 10, 20), 50);
+  score += volScore;
+
+  // 2. GAP (L'élastique)
+  // Cible idéale : 1.2% à 2.0%. 
+  // Formule dégressive : Plus on s'éloigne de l'idéal, moins on gagne.
+  // Base 30 pts.
+  let gapScore = 0;
+  if (gap >= 0.8 && gap <= 3.0) {
+    // Au coeur de la zone (1.0 - 2.0), on donne le max.
+    if (gap >= 1.0 && gap <= 2.0) gapScore = 30;
+    // En bordure, on réduit linéairement
+    else gapScore = 20;
+  } else {
+    gapScore = 10; // Hors zone mais acceptable
+  }
+  score += gapScore;
+
+  // 3. RSI (Le momentum)
+  // Bon RSI = +20, Mauvais = +10.
+  // On garde du simple ici pour l'instant car le RSI est binaire (Bon zone / Mauvaise zone)
+  const goodRsiLong = (rec.rsi5 >= 45 && rec.rsi5 <= 65);
+  const goodRsiShort = (rec.rsi5 >= 25 && rec.rsi5 <= 45);
+  score += (dir === "LONG" ? (goodRsiLong ? 20 : 10) : (goodRsiShort ? 20 : 10));
+
+  // 4. Biais BTC
   score += getBiasScoreAdjustment(dir, marketContext);
 
   // 🎯 Score filters phase 3 (DEGEN Trap protection)
