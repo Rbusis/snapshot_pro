@@ -54,6 +54,9 @@ const SYMBOLS = [
 const prevOI = new Map();
 const lastAlerts = new Map();
 const lastSentDirection = new Map();
+// Map pour suivre les trades actifs : clef=symbol, valeur=timestamp
+const activeTrades = new Map();
+const TIME_LIMIT_MS = 72 * 60 * 60_000; // 72 heures (Majors swing trading)
 
 // ========= UTIL =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -236,16 +239,43 @@ async function scanOnce() {
     lines.push(`💰 Prix: ${c.rec.last}\n💠 Entry: ${c.plan.entry}\n🎯 TP: ${c.plan.tp1} / ${c.plan.tp2}\n🛑 SL: ${c.plan.sl}`);
     lines.push(`🔒 SL → BE @ ${c.plan.bePrice}\n⚖️ Levier: ${SUGGESTED_LEVERAGE}`);
     registerSignal("MAJORS", c.symbol, c.direction);
+
+    // Enregistrement pour le suivi chrono
+    activeTrades.set(c.symbol, Date.now());
   }
 
   await sendTelegram(lines.join("\n"));
+}
+
+// ========= TIME LIMIT MONITOR =========
+async function checkTimeLimits() {
+  const now = Date.now();
+  for (const [symbol, entryTime] of activeTrades.entries()) {
+    if (now - entryTime >= TIME_LIMIT_MS) {
+      // Envoi alerte
+      const msg = `⚠️ *MAJORS TIME LIMIT* ⚠️
+
+⌛ *${symbol}* a dépassé 72 heures.
+
+👉 *CLOSE NOW* (Si pas déjà fait).
+Réévalue ta position sur ce Major.`;
+      await sendTelegram(msg);
+      console.log(`[MAJORS TIMER] Alert sent for ${symbol}`);
+
+      // On retire du monitoring pour ne pas spammer
+      activeTrades.delete(symbol);
+    }
+  }
 }
 
 export async function startAutoselect() {
   console.log("🔥 JTF MAJORS v2.0 On");
   await sendTelegram("🟢 JTF MAJORS v2.0 On");
   while (true) {
-    try { await scanOnce(); } catch (e) { console.log("[MAJORS ERROR]", e); }
+    try {
+      await scanOnce();
+      await checkTimeLimits(); // Vérification des chronos à chaque cycle
+    } catch (e) { console.log("[MAJORS ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
