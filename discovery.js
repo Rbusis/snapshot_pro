@@ -187,7 +187,11 @@ async function analyzeDiscovery(rec, marketContext) {
     console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 96 is too risky`);
     return null;
   }
-  if (score < 75) return null;
+  if (score > 96) {
+    console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 96 is too risky`);
+    return null;
+  }
+  if (score < 80) return null; // Raised to 80 to reduce noise
 
   // 🎯 Advanced Filters (Orderbook/Funding)
   const adv = await applyAdvancedFilters(rec.symbol, dir, score);
@@ -250,7 +254,11 @@ async function scanDiscovery() {
   if (!signals.length) return;
   const best = signals.sort((a, b) => b.score - a.score)[0];
 
-  if (isRecentlySignaled(best.symbol) || (Date.now() - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS)) return;
+  if (isRecentlySignaled(best.symbol, 24 * 3600_000)) {
+    logDebug(`Skipping ${best.symbol} (Already signaled in last 24h)`);
+    return;
+  }
+  if (Date.now() - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS) return;
 
   const emoji = best.direction === "LONG" ? "🚀" : "🪂";
   const msg = `⚡ JTF DISCOVERY v2.0 ⚡\n\n${emoji} ${best.symbol} — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Prix: ${best.price}\n💠 Entry: ${best.limitEntry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔒 Secure BE: ${best.bePrice}\n⚖️ Levier: ${best.levier}`;
