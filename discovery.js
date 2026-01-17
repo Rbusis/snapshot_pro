@@ -177,17 +177,17 @@ async function analyzeDiscovery(rec, marketContext) {
   }
 
   let score = 0;
-  score += rec.volRatio >= 3.5 ? 35 : 25;
-  score += (gap >= 1.0 && gap <= 2.5) ? 30 : 15;
-  score += (dir === "LONG" ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 15 : 5) : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 15 : 5));
+  score += rec.volRatio >= 3.5 ? 40 : 25;
+  score += (gap >= 0.8 && gap <= 2.5) ? 30 : 15;
+  score += (dir === "LONG" ? (rec.rsi5 >= 45 && rec.rsi5 <= 65 ? 20 : 10) : (rec.rsi5 >= 25 && rec.rsi5 <= 45 ? 20 : 10));
   score += getBiasScoreAdjustment(dir, marketContext);
 
   // 🎯 Score filters phase 3 (DEGEN Trap protection)
-  if (score > 95) {
-    console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 95 is too risky`);
+  if (score > 96) {
+    console.log(`[DISCOVERY TRAP] ${rec.symbol} — Score ${score.toFixed(1)} > 96 is too risky`);
     return null;
   }
-  if (score < 80) return null;
+  if (score < 75) return null;
 
   // 🎯 Advanced Filters (Orderbook/Funding)
   const adv = await applyAdvancedFilters(rec.symbol, dir, score);
