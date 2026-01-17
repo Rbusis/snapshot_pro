@@ -336,7 +336,7 @@ async function scanOnce() {
     if (!rec) continue;
 
     const jds = calculateJDSSwing(rec, marketContext);
-    logDebug(`${s} -> JDS: ${jds.toFixed(1)} (Daily: ${rec.dailyTrend}, RSI1h: ${rec.rsi["1h"]?.toFixed(1)}, MFI: ${rec.mfi?.toFixed(1)}, Div: ${rec.div}, OI: ${rec.oiImpulse})`);
+    logDebug(`${s} -> JDS: ${jds.toFixed(1)} (Daily: ${rec.dailyTrend}, RSI1h: ${rec.rsi["1h"]?.toFixed(1)}, MFI: ${rec.mfi["4h"]?.toFixed(1)}, Div: ${rec.divRSI}, OI: ${rec.oiImpulse.toFixed(1)}%)`);
 
     if (jds < 75) continue; // v3.1 Elite tightened: was 65
 
