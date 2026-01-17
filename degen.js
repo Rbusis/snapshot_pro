@@ -259,6 +259,8 @@ async function scanDegen() {
   const emoji = best.direction === "LONG" ? "🚀" : "🪂";
   const msg = `⚡ *JTF DEGEN v4.0* ⚡\n\n${emoji} *${best.symbol}* — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Entry: ${best.entry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔒 Secure BE: ${best.bePrice}\n⚖️ Levier: ${best.levier}`;
 
+  console.log(`🔥 [DEGEN SIGNAL] ${best.symbol} (${best.direction}) - Score: ${best.score.toFixed(1)}`);
+
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: msg, parse_mode: "Markdown" })
