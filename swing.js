@@ -32,7 +32,7 @@ function logDebug(...args) {
 }
 
 // ========= CONFIG =========
-const SCAN_INTERVAL_MS = 30 * 60_000; // 30 minutes
+const SCAN_INTERVAL_MS = 15 * 60_000; // 15 minutes (was 30)
 
 const DIRECTIONAL_BIAS = process.env.SWING_BIAS || "BOTH";
 const BIAS_STRICT_MODE = process.env.SWING_BIAS_STRICT === "true";
@@ -317,10 +317,10 @@ function buildPlan(rec, dir) {
 }
 
 async function scanOnce() {
-  if (isTimeBlocked()) {
-    console.log("🌙 [SWING] Midnight Window (Taiwan) — Blocking new entries");
-    return;
-  }
+  // if (isTimeBlocked()) {
+  //   console.log("🌙 [SWING] Midnight Window (Taiwan) — Blocking new entries");
+  //   return;
+  // }
   const start = Date.now();
   console.log("🔍 [SWING] SCAN STARTED...");
   const marketContext = await getMarketBias();
