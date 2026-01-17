@@ -58,7 +58,7 @@ const SYMBOLS = [
 ];
 
 // ========= STATE =========
-const prevOI = new Map();
+let prevOICache = {}; // In-memory fallback
 const lastAlerts = new Map();
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -143,6 +143,26 @@ function ema(c, p = 200) {
   return v;
 }
 
+/**
+ * Persister l'Open Interest entre les redémarrages
+ */
+import fs from "fs";
+const OI_CACHE_FILE = "./oi_cache.json";
+function loadOICache() {
+  try {
+    if (fs.existsSync(OI_CACHE_FILE)) {
+      return JSON.parse(fs.readFileSync(OI_CACHE_FILE, "utf8"));
+    }
+  } catch (e) { console.error("[SWING] Error loading OI cache", e); }
+  return {};
+}
+function saveOICache(cache) {
+  try {
+    fs.writeFileSync(OI_CACHE_FILE, JSON.stringify(cache));
+  } catch (e) { console.error("[SWING] Error saving OI cache", e); }
+}
+prevOICache = loadOICache();
+
 function mfi(c, p = 14) {
   if (c.length < p + 1) return null;
   const pmf = [], nmf = [];
@@ -168,25 +188,27 @@ function detectDivergence(prices, items) {
   const lastP = prices[prices.length - 1];
   const lastI = items[items.length - 1];
 
-  // Bulish: Low lower than previous low, Ind higher than previous low
-  // Bearish: High higher than previous high, Ind lower than previous high
-  // Simple check on last 10 candles vs previous 10-20
-  const p_prev = prices.slice(-20, -10);
-  const i_prev = items.slice(-20, -10);
+  // Regarder les points bas sur les 20 dernières bougies
+  // On compare le bloc récent [20-30] au bloc précédent [0-20]
+  const p_old = prices.slice(0, 20);
+  const i_old = items.slice(0, 20);
 
-  const p_min_prev = Math.min(...p_prev);
-  const i_min_prev = Math.min(...i_prev);
-  const p_max_prev = Math.max(...p_prev);
-  const i_max_prev = Math.max(...i_prev);
+  const p_min_old = Math.min(...p_old);
+  const i_min_old = Math.min(...i_old);
+  const p_max_old = Math.max(...p_old);
+  const i_max_old = Math.max(...i_old);
 
-  if (lastP < p_min_prev && lastI > i_min_prev) return "BULLISH";
-  if (lastP > p_max_prev && lastI < i_max_prev) return "BEARISH";
+  // Bullish: Prix fait un "lower low" mais indicateur fait un "higher low"
+  if (lastP < p_min_old && lastI > i_min_old) return "BULLISH";
+
+  // Bearish: Prix fait un "higher high" mais indicateur fait un "lower high"
+  if (lastP > p_max_old && lastI < i_max_old) return "BEARISH";
 
   return null;
 }
 
 // ========= PROCESS =========
-async function processSymbol(symbol) {
+export async function processSymbol(symbol) {
   const [tk, currentOI] = await Promise.all([getTicker(symbol), getOI(symbol)]);
   if (!tk) return null;
   const last = +(tk.lastPr ?? tk.markPrice ?? tk.last ?? tk.close ?? 0);
@@ -214,9 +236,11 @@ async function processSymbol(symbol) {
 
   // OI Impulse
   const oiVal = parseFloat(currentOI?.openInterest || currentOI || 0);
-  const prev = prevOI.get(symbol);
+  const prev = prevOICache[symbol];
   const oiImpulse = prev ? ((oiVal / prev) - 1) * 100 : 0;
-  prevOI.set(symbol, oiVal);
+
+  prevOICache[symbol] = oiVal;
+  saveOICache(prevOICache);
 
   // Daily Trend
   const dailyClose = c1d.map(x => x.c);
@@ -238,37 +262,45 @@ async function processSymbol(symbol) {
 
 // ========= ENGINE =========
 function calculateJDSSwing(rec, marketContext) {
-  let score = 20; // Lower base for Elite v3.1
+  let score = 0; // On part de 0 pour une notation plus chirurgicale
 
-  // 1. RSI 4h Alignment (+10)
-  if (rec.rsi["4h"] >= 45 && rec.rsi["4h"] <= 65) score += 10;
-
-  // 2. Daily Trend (+15)
+  // 1. DIRECTION & TREND CORE (Prerequis de base)
   const dir = rec.rsi["1h"] >= 50 ? "LONG" : "SHORT";
-  if (dir === "LONG" && rec.dailyTrend === "UP") score += 15;
-  if (dir === "SHORT" && rec.dailyTrend === "DOWN") score += 15;
 
-  // 3. EMA 200 Filter (+10)
+  // Daily Trend Alignment (+20) - Vital pour le Swing
+  if (dir === "LONG" && rec.dailyTrend === "UP") score += 20;
+  else if (dir === "SHORT" && rec.dailyTrend === "DOWN") score += 20;
+  else score -= 10; // Pénalité si on est à contre-tendance D1
+
+  // EMA 200 Filter (+15)
   if (rec.ema200) {
-    if (dir === "LONG" && rec.last > rec.ema200) score += 10;
-    if (dir === "SHORT" && rec.last < rec.ema200) score += 10;
+    if (dir === "LONG" && rec.last > rec.ema200) score += 15;
+    else if (dir === "SHORT" && rec.last < rec.ema200) score += 15;
+    else score -= 5;
   }
 
-  // 4. MFI Elite (+15)
-  if (rec.mfi["4h"] != null) {
-    if (dir === "LONG" && rec.mfi["4h"] < 40) score += 15; // Money flow starting to reverse from oversold
-    if (dir === "SHORT" && rec.mfi["4h"] > 60) score += 15; // Money flow starting to reverse from overbought
-  }
+  // 2. MOMENTUM & RSI SWEET SPOT (+15)
+  // On cherche la zone où le prix a encore de la place pour courir
+  if (dir === "LONG" && rec.rsi["4h"] >= 40 && rec.rsi["4h"] <= 58) score += 15;
+  if (dir === "SHORT" && rec.rsi["4h"] >= 42 && rec.rsi["4h"] <= 60) score += 15;
 
-  // 5. Divergence Elite (+20)
+  // 3. ELITE BOOSTERS (Ce qui fait passer de 50-60 à 75+)
+  // Divergence Elite (+25) - Poids lourd car signal de retournement fort
   if (rec.divRSI === (dir === "LONG" ? "BULLISH" : "BEARISH")) {
-    score += 20;
+    score += 25;
   }
 
-  // 6. OI Impulse (+10)
-  if (rec.oiImpulse > 0.5) score += 10; // New money confirming the trend
+  // MFI Elite Reversal (+15)
+  if (rec.mfi["4h"] != null) {
+    if (dir === "LONG" && rec.mfi["4h"] < 35) score += 15;
+    if (dir === "SHORT" && rec.mfi["4h"] > 65) score += 15;
+  }
 
-  // 7. Market Bias (+10/-10)
+  // OI Impulse Elite (+10 à +20)
+  if (rec.oiImpulse > 1.5) score += 20;
+  else if (rec.oiImpulse > 0.5) score += 10;
+
+  // 4. MARKET BIAS (+10/-10)
   score += getBiasScoreAdjustment(dir, marketContext);
 
   return score;
@@ -306,7 +338,7 @@ async function scanOnce() {
     const jds = calculateJDSSwing(rec, marketContext);
     logDebug(`${s} -> JDS: ${jds.toFixed(1)} (Daily: ${rec.dailyTrend}, RSI1h: ${rec.rsi["1h"]?.toFixed(1)})`);
 
-    if (jds < 65) continue; // v3.1 Elite requires 65+ for high conviction
+    if (jds < 75) continue; // v3.1 Elite tightened: was 65
 
     const dir = rec.rsi["1h"] >= 50 ? "LONG" : "SHORT";
     if (shouldSkipDirection(dir)) continue;
@@ -319,7 +351,7 @@ async function scanOnce() {
   if (!setups.length) return;
   const top = setups.sort((a, b) => b.jds - a.jds)[0];
 
-  const msg = `🎯 *JTF SWING v3.1 Elite*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n🔥 Score: ${top.jds.toFixed(1)}\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI Impulse: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Divergence: ${top.rec.divRSI || "Aucune"}`;
+  const msg = `🎯 *JTF SWING v3.1 Elite*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n⚖️ Levier: 3x\n🔥 Score: ${top.jds.toFixed(1)}\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI Impulse: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Divergence: ${top.rec.divRSI || "Aucune"}`;
 
   await sendTelegram(msg);
   registerSignal("SWING", top.symbol, top.dir);
