@@ -60,6 +60,9 @@ const SYMBOLS = [
 // ========= STATE =========
 let prevOICache = {}; // In-memory fallback
 const lastAlerts = new Map();
+// Map pour suivre les trades actifs : clef=symbol, valeur=timestamp
+const activeTrades = new Map();
+const TIME_LIMIT_MS = 48 * 60 * 60_000; // 48 heures (Swing trading)
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const num = (v, d = 4) => v == null ? null : +(+v).toFixed(d);
@@ -355,13 +358,40 @@ async function scanOnce() {
 
   await sendTelegram(msg);
   registerSignal("SWING", top.symbol, top.dir);
+
+  // Enregistrement pour le suivi chrono
+  activeTrades.set(top.symbol, Date.now());
+}
+
+// ========= TIME LIMIT MONITOR =========
+async function checkTimeLimits() {
+  const now = Date.now();
+  for (const [symbol, entryTime] of activeTrades.entries()) {
+    if (now - entryTime >= TIME_LIMIT_MS) {
+      // Envoi alerte
+      const msg = `⚠️ *SWING TIME LIMIT* ⚠️
+
+⌛ *${symbol}* a dépassé 48 heures.
+
+👉 *CLOSE NOW* (Si pas déjà fait).
+Réévalue ta position.`;
+      await sendTelegram(msg);
+      console.log(`[SWING TIMER] Alert sent for ${symbol}`);
+
+      // On retire du monitoring pour ne pas spammer
+      activeTrades.delete(symbol);
+    }
+  }
 }
 
 export async function startSwing() {
   console.log("🔥 SWING v3.1 Elite On");
   await sendTelegram("🟢 JTF SWING v3.1 Elite On");
   while (true) {
-    try { await scanOnce(); } catch (e) { console.error("[SWING ERROR]", e); }
+    try {
+      await scanOnce();
+      await checkTimeLimits(); // Vérification des chronos à chaque cycle
+    } catch (e) { console.error("[SWING ERROR]", e); }
     await sleep(SCAN_INTERVAL_MS);
   }
 }
