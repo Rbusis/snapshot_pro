@@ -237,12 +237,15 @@ export async function processSymbol(symbol) {
   // Optimization: detectDivergence needs more history but we slice for simplicity here
   const divRSI = detectDivergence(prices, rsiValues);
 
-  // OI Impulse
-  const oiVal = parseFloat(currentOI?.openInterest || currentOI || 0);
+  // OI Impulse - Fixed: Bitget API v2 returns "openInterestUsd" as string
+  const oiVal = parseFloat(currentOI?.openInterestUsd || currentOI?.openInterest || 0);
   const prev = prevOICache[symbol];
-  const oiImpulse = prev ? ((oiVal / prev) - 1) * 100 : 0;
+  const oiImpulse = (prev && oiVal && prev > 0) ? ((oiVal / prev) - 1) * 100 : 0;
 
-  prevOICache[symbol] = oiVal;
+  // Save current OI for next comparison (only if we got a valid value)
+  if (oiVal > 0) {
+    prevOICache[symbol] = oiVal;
+  }
   saveOICache(prevOICache);
 
   // Daily Trend
