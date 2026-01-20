@@ -92,7 +92,8 @@ async function getTicker(symbol) {
 
 async function getOI(symbol) {
   const j = await safeGetJson(`https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${baseSymbol(symbol)}&productType=usdt-futures`);
-  return j?.data?.[0] || j?.data;
+  // Bitget API v2 returns { data: { openInterestList: [ { symbol, size }, ... ] } }
+  return j?.data?.openInterestList?.[0] || j?.data;
 }
 
 async function getCandles(symbol, sec, limit = 200) {
@@ -118,7 +119,7 @@ async function processSymbol(symbol) {
   const last = +(tk.lastPr ?? tk.markPrice ?? tk.last ?? 0);
   if (!last || last <= 0) return null;
 
-  const openInterest = oi?.amount != null ? +oi.amount : null;
+  const openInterest = oi?.size != null ? +oi.size : (oi?.amount != null ? +oi.amount : null);
   const prev = prevOI.get(symbol) ?? null;
   const deltaOI = prev != null && openInterest != null && prev !== 0 ? ((openInterest - prev) / prev) * 100 : null;
   prevOI.set(symbol, openInterest ?? prev);
