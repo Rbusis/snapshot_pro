@@ -95,7 +95,8 @@ async function getTicker(symbol) {
 async function getOI(symbol) {
   const r = await fetch(`https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${symbol}&productType=usdt-futures`);
   const j = await r.json();
-  return j?.data?.[0] || j?.data;
+  // Bitget API v2 returns { data: { openInterestList: [ { symbol, size }, ... ] } }
+  return j?.data?.openInterestList?.[0] || j?.data;
 }
 
 // ========= INDICATORS =========
@@ -237,8 +238,8 @@ export async function processSymbol(symbol) {
   // Optimization: detectDivergence needs more history but we slice for simplicity here
   const divRSI = detectDivergence(prices, rsiValues);
 
-  // OI Impulse - Fixed: Bitget API v2 returns "openInterestUsd" as string
-  const oiVal = parseFloat(currentOI?.openInterestUsd || currentOI?.openInterest || 0);
+  // OI Impulse - Fixed: Bitget API v2 returns "size" instead of "openInterestUsd"
+  const oiVal = parseFloat(currentOI?.size || currentOI?.openInterest || 0);
   const prev = prevOICache[symbol];
   const oiImpulse = (prev && oiVal && prev > 0) ? ((oiVal / prev) - 1) * 100 : 0;
 
