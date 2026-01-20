@@ -247,7 +247,7 @@ async function analyzeDiscovery(rec, marketContext) {
   // Correction BE (Anti-Negative BE)
   const bePrice = dir === "LONG" ? entry * 1.002 : entry * 0.998; // +0.2% flush commission
 
-  return { symbol: rec.symbol, direction: dir, score, price: num(rec.last, decimals), limitEntry: num(entry, decimals), sl: num(sl, decimals), tp1: num(tp1, decimals), tp2: num(tp2, decimals), bePrice: num(bePrice, decimals), levier: riskPct > 4 ? "2x" : "3x" };
+  return { symbol: rec.symbol, direction: dir, score, price: num(rec.last, decimals), limitEntry: num(entry, decimals), sl: num(sl, decimals), tp1: num(tp1, decimals), tp2: num(tp2, decimals), beTrigger: num(tp1, decimals), bePrice: num(bePrice, decimals), levier: riskPct > 4 ? "2x" : "3x" };
 }
 
 // ========= MAIN LOOP =========
@@ -294,7 +294,7 @@ async function scanDiscovery() {
   if (Date.now() - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS) return;
 
   const emoji = best.direction === "LONG" ? "🚀" : "🪂";
-  const msg = `⚡ JTF DISCOVERY v2.0 ⚡\n\n${emoji} ${best.symbol} — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Prix: ${best.price}\n💠 Entry: ${best.limitEntry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔒 Secure BE: ${best.bePrice}\n⚖️ Levier: ${best.levier}`;
+  const msg = `⚡ JTF DISCOVERY v2.0 ⚡\n\n${emoji} ${best.symbol} — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Prix: ${best.price}\n💠 Entry: ${best.limitEntry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔁 SL -> BE @ ${best.beTrigger}\n⚖️ Levier: ${best.levier}`;
 
   console.log(`🔥 [DISCOVERY SIGNAL] ${best.symbol} (${best.direction}) - Score: ${best.score.toFixed(1)}`);
 
