@@ -70,7 +70,7 @@ export async function getOIImpulse(symbol) {
         // On n'a qu'une valeur ponctuelle ici. Pour une impulsion, il faudrait comparer avec t-1.
         // Simplification pour Phase 3 : On renvoie la valeur absolue brute pour scoring relatif si besoin
         // Ou on assume que le bot stocke la valeur précédente si on veut une impulsion.
-        return parseFloat(data.data[0].openInterest || 0);
+        return parseFloat(data.data[0].holdingAmount || data.data[0].openInterest || 0);
     } catch (e) {
         return 0;
     }
