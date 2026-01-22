@@ -305,12 +305,15 @@ async function scanOnce() {
   const selected = candidates.sort((a, b) => b.score - a.score).slice(0, MAX_SIGNALS_PER_SCAN);
   if (!selected.length) return;
 
-  const lines = ["⚡ *JTF MAJORS v2.0* ⚡"];
+  const lines = ["⚡ *JTF MAJORS v2.1 Elite* ⚡"];
   for (const c of selected) {
     const dirEmoji = c.direction === "LONG" ? "🚀" : "🪂";
     lines.push(`\n${dirEmoji} *${c.symbol}* — ${c.direction}\n🏅 Score: ${c.score.toFixed(1)}`);
-    lines.push(`💰 Prix: ${c.rec.last}\n💠 Entry: ${c.plan.entry}\n🎯 TP: ${c.plan.tp1} / ${c.plan.tp2}\n🛑 SL: ${c.plan.sl}`);
-    lines.push(`🔒 SL → BE @ ${c.plan.bePrice}\n⚖️ Levier: ${SUGGESTED_LEVERAGE}`);
+    lines.push(`\n💰 Prix: ${c.rec.last}\n💠 Entry: ${c.plan.entry}\n🎯 TP: ${c.plan.tp1} / ${c.plan.tp2}\n🛑 SL: ${c.plan.sl}\n🔁 SL → BE @ ${c.plan.bePrice}\n⚖️ Levier: ${SUGGESTED_LEVERAGE}`);
+
+    // Elite Metrics (Optional but helpful for Majors)
+    lines.push(`\n📊 *Elite Metrics:*\n📉 MFI 4h: ${c.rec.mfi4h?.toFixed(1)}\n🌪 OI: ${c.rec.deltaOIpct?.toFixed(2)}%\n🔍 Div: ${c.rec.divRSI || "Aucune"}`);
+
     registerSignal("MAJORS", c.symbol, c.direction);
 
     // Enregistrement pour le suivi chrono
