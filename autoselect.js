@@ -28,7 +28,7 @@ const SCAN_INTERVAL_MS = 5 * 60_000;
 const MIN_ALERT_DELAY_MS = 15 * 60_000;
 const FLIP_COOLDOWN_MS = 30 * 60_000;
 const MAX_SIGNALS_PER_SCAN = 2;
-const SUGGESTED_LEVERAGE = "10x";
+const SUGGESTED_LEVERAGE = "8x";
 
 const DIRECTIONAL_BIAS = process.env.TOP30_BIAS || "BOTH";
 const BIAS_STRICT_MODE = process.env.TOP30_BIAS_STRICT === "true";
@@ -56,7 +56,7 @@ const lastAlerts = new Map();
 const lastSentDirection = new Map();
 // Map pour suivre les trades actifs : clef=symbol, valeur=timestamp
 const activeTrades = new Map();
-const TIME_LIMIT_MS = 72 * 60 * 60_000; // 72 heures (Majors swing trading)
+const TIME_LIMIT_MS = 24 * 60 * 60_000; // 24 heures (Micro-pivots focus)
 
 // ========= UTIL =========
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -129,16 +129,74 @@ async function processSymbol(symbol) {
 
   const dP15 = closeChange(c15m);
 
-  // 🎯 Sensibilité augmentée (Suppression du / 3)
-  const MMS_long = toScore100(-(dP15) || 0);
-  const MMS_short = toScore100(+(dP15) || 0);
+  // 🎯 Sensibilité optimisée (Phase 3.1)
+  const MMS_long = toScore100(-(dP15 / 1.5) || 0);
+  const MMS_short = toScore100(+(dP15 / 1.5) || 0);
+
+  // 🎯 Multi-timeframe for Elite indicators
+  const [c1h, c4h] = await Promise.all([
+    getCandles(symbol, 3600, 50),
+    getCandles(symbol, 14400, 100)
+  ]);
+
+  const mfi4h = mfi(c4h.slice(-30));
+  const prices4h = c4h.slice(-30).map(x => x.c);
+  // Simple RSI calculation for divergence
+  const rsiValues = c4h.slice(-30).map((_, i) => {
+    const sub = c4h.slice(0, 70 + i).map(x => x.c);
+    return rsiSimple(sub);
+  });
+  const divRSI = detectDivergence(prices4h, rsiValues);
 
   return {
     symbol, last,
     volaPct: tk.high24h && tk.low24h ? ((+tk.high24h - +tk.low24h) / last) * 100 : 5,
     deltaOIpct: deltaOI != null ? +num(deltaOI, 3) : null,
-    MMS_long, MMS_short
+    MMS_long, MMS_short,
+    mfi4h, divRSI
   };
+}
+
+// --------- ELITE INDICATORS (Ported from swing.js) ---------
+function mfi(c, p = 14) {
+  if (c.length < p + 1) return null;
+  const pmf = [], nmf = [];
+  for (let i = 1; i < c.length; i++) {
+    const tp_curr = (c[i].h + c[i].l + c[i].c) / 3;
+    const tp_prev = (c[i - 1].h + c[i - 1].l + c[i - 1].c) / 3;
+    const mf = tp_curr * c[i].v;
+    if (tp_curr > tp_prev) { pmf.push(mf); nmf.push(0); }
+    else if (tp_curr < tp_prev) { pmf.push(0); nmf.push(mf); }
+    else { pmf.push(0); nmf.push(0); }
+  }
+  if (pmf.length < p) return null;
+  let s_pmf = pmf.slice(-p).reduce((a, b) => a + b, 0);
+  let s_nmf = nmf.slice(-p).reduce((a, b) => a + b, 0);
+  return s_nmf === 0 ? 100 : 100 - (100 / (1 + (s_pmf / s_nmf)));
+}
+
+function rsiSimple(cl, p = 14) {
+  if (cl.length < p + 1) return 50;
+  let g = 0, l = 0;
+  for (let i = 1; i <= p; i++) {
+    const d = cl[i] - cl[i - 1];
+    d >= 0 ? g += d : l -= d;
+  }
+  g /= p; l = (l / p) || 1e-9;
+  return 100 - 100 / (1 + (g / l));
+}
+
+function detectDivergence(prices, items) {
+  if (prices.length < 20 || items.length < 20) return null;
+  const lastP = prices[prices.length - 1];
+  const lastI = items[items.length - 1];
+  const p_min_old = Math.min(...prices.slice(0, 15));
+  const i_min_old = Math.min(...items.slice(0, 15));
+  const p_max_old = Math.max(...prices.slice(0, 15));
+  const i_max_old = Math.max(...items.slice(0, 15));
+  if (lastP < p_min_old && lastI > i_min_old) return "BULLISH";
+  if (lastP > p_max_old && lastI < i_max_old) return "BEARISH";
+  return null;
 }
 
 // ====== JDS Engine ======
@@ -146,13 +204,27 @@ function fuseJDS(rec, marketContext) {
   const short_adj = getBiasScoreAdjustment("SHORT", marketContext);
   const long_adj = getBiasScoreAdjustment("LONG", marketContext);
 
-  const mms_short_adjusted = rec.MMS_short + short_adj;
-  const mms_long_adjusted = rec.MMS_long + long_adj;
+  let scoreShort = rec.MMS_short + short_adj;
+  let scoreLong = rec.MMS_long + long_adj;
 
-  if (mms_short_adjusted > mms_long_adjusted) {
-    return { direction: "SHORT", jds: rec.MMS_short + (short_adj / 2) };
+  // 🎯 Elite Boosters (MFI & Divergence)
+  if (rec.mfi4h != null) {
+    if (rec.mfi4h > 65) scoreShort += 15;
+    if (rec.mfi4h < 35) scoreLong += 15;
   }
-  return { direction: "LONG", jds: rec.MMS_long + (long_adj / 2) };
+  if (rec.divRSI === "BEARISH") scoreShort += 20;
+  if (rec.divRSI === "BULLISH") scoreLong += 20;
+
+  // 🎯 OI Impulse
+  if (rec.deltaOIpct > 0.5) {
+    scoreShort += 10;
+    scoreLong += 10;
+  }
+
+  if (scoreShort > scoreLong) {
+    return { direction: "SHORT", jds: scoreShort };
+  }
+  return { direction: "LONG", jds: scoreLong };
 }
 
 // ========= PLAN DE TRADE =========
@@ -160,7 +232,7 @@ function buildTradePlan(rec, fusion, rr) {
   const p = rec.last;
   const dir = fusion.direction;
   const decimals = getPriceDecimals(p);
-  const riskPct = clamp((rec.volaPct ?? 5) / 2.5, 0.4, 3); // Plus serré sur Majors
+  const riskPct = clamp((rec.volaPct ?? 5) / 2.5, 0.8, 4); // Elargi sur Majors Phase 3.1
   const rewardPct = riskPct * rr;
 
   let sl, tp1, tp2;
@@ -177,7 +249,7 @@ function buildTradePlan(rec, fusion, rr) {
   return {
     entry: num(p, decimals), sl: num(sl, decimals),
     tp1: num(tp1, decimals), tp2: num(tp2, decimals),
-    bePrice: num(dir === "LONG" ? p + Math.abs(p - sl) : p - Math.abs(p - sl), decimals)
+    bePrice: num(dir === "LONG" ? p + Math.abs(p - sl) * 0.5 : p - Math.abs(p - sl) * 0.5, decimals)
   };
 }
 
@@ -206,9 +278,9 @@ async function scanOnce() {
     const fusion = fuseJDS(rec, marketContext);
     logDebug(`${rec.symbol} -> Fusion: ${fusion.direction}, Score: ${fusion.jds.toFixed(1)}`);
 
-    // 🎯 Clipping @ 95 (Phase 3 optimization)
+    // 🎯 Threshold 85 (Phase 3.1 optimization)
     let score = Math.min(fusion.jds, 95);
-    if (score < 80) continue;
+    if (score < 85) continue;
 
     if (shouldSkipDirection(fusion.direction)) {
       logDebug(`[MAJORS SKIP] ${rec.symbol} — Direction ${fusion.direction} skipped by bias config`);
