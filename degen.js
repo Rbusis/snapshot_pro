@@ -220,7 +220,19 @@ async function analyzeCandidate(rec, marketContext) {
   // Correction BE (Anti-Negative BE)
   const bePrice = dir === "LONG" ? entry * 1.002 : entry * 0.998;
 
-  return { symbol: rec.symbol, direction: dir, score, entry: num(entry, decimals), sl: num(sl, decimals), tp1: num(tp1, decimals), tp2: num(tp2, decimals), beTrigger: num(tp1, decimals), bePrice: num(bePrice, decimals), levier: riskPct > 2.8 ? "2x" : "3x", rr };
+  return {
+    symbol: rec.symbol,
+    direction: dir,
+    score,
+    entry: num(entry, decimals),
+    sl: num(sl, decimals),
+    tp1: num(tp1, decimals),
+    tp2: num(tp2, decimals),
+    beTrigger: num(dir === "LONG" ? entry + Math.abs(entry - sl) * 0.3 : entry - Math.abs(entry - sl) * 0.3, decimals),
+    bePrice: num(bePrice, decimals),
+    levier: riskPct > 2.8 ? "2x" : "3x",
+    rr
+  };
 }
 
 // ========= MAIN LOOP =========
