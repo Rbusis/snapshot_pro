@@ -365,7 +365,8 @@ async function scanOnce() {
   if (!setups.length) return;
   const top = setups.sort((a, b) => b.jds - a.jds)[0];
 
-  const msg = `🎯 *JTF SWING v3.1 Elite*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp1} / ${top.plan.tp2}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n⚖️ Levier: 3x\n🔥 Score: ${top.jds.toFixed(1)}\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI Impulse: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Divergence: ${top.rec.divRSI || "Aucune"}`;
+  const emoji = top.dir === "LONG" ? "🚀" : "🪂";
+  const msg = `🎯 *JTF SWING v3.1 Elite* 🎯\n\n${emoji} *${top.symbol}* — ${top.dir}\n🏅 Score: ${top.jds.toFixed(1)}\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp1} / ${top.plan.tp2}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n⚖️ Levier: 3x\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Div: ${top.rec.divRSI || "Aucune"}`;
 
   await sendTelegram(msg);
   registerSignal("SWING", top.symbol, top.dir);
