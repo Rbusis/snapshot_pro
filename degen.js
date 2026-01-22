@@ -230,6 +230,7 @@ async function analyzeCandidate(rec, marketContext) {
     tp2: num(tp2, decimals),
     beTrigger: num(dir === "LONG" ? entry + Math.abs(entry - sl) * 0.3 : entry - Math.abs(entry - sl) * 0.3, decimals),
     bePrice: num(bePrice, decimals),
+    price: num(rec.last, decimals),
     levier: riskPct > 2.8 ? "2x" : "3x",
     rr
   };
@@ -269,7 +270,7 @@ async function scanDegen() {
   if (isRecentlySignaled(best.symbol) || (Date.now() - lastGlobalTradeTime < GLOBAL_COOLDOWN_MS)) return;
 
   const emoji = best.direction === "LONG" ? "🚀" : "🪂";
-  const msg = `⚡ *JTF DEGEN v4.0* ⚡\n\n${emoji} *${best.symbol}* — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Entry: ${best.entry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔁 SL -> BE @ ${best.beTrigger}\n⚖️ Levier: ${best.levier}`;
+  const msg = `⚡ *JTF DEGEN v4.1* ⚡\n\n${emoji} *${best.symbol}* — ${best.direction}\n🏅 Score: ${best.score.toFixed(1)}\n\n💰 Prix: ${best.price}\n💠 Entry: ${best.entry}\n🎯 TP: ${best.tp1} / ${best.tp2}\n🛑 SL: ${best.sl}\n🔁 SL → BE @ ${best.beTrigger}\n⚖️ Levier: ${best.levier}`;
 
   console.log(`🔥 [DEGEN SIGNAL] ${best.symbol} (${best.direction}) - Score: ${best.score.toFixed(1)}`);
 
