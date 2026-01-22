@@ -12,7 +12,7 @@ http.createServer((req, res) => {
   res.writeHead(200);
   res.end("🤖 QUAD-BOT RUNNING (Autoselect + Discovery + Degen + Swing)");
 }).listen(PORT, () => {
-  console.log(`🛡️ Serveur Global : port ${PORT}`);
+  console.log(`🛡️ Serveur Global: port ${PORT} `);
 });
 
 console.log("🏁 Démarrage des bots…");
