@@ -319,8 +319,15 @@ function buildPlan(rec, dir) {
   const rr = 1.8;
   const decimals = getPriceDecimals(p);
   const sl = dir === "LONG" ? p * (1 - riskPct / 100) : p * (1 + riskPct / 100);
-  const tp = dir === "LONG" ? p * (1 + (riskPct * rr) / 100) : p * (1 - (riskPct * rr) / 100);
-  return { entry: num(p, decimals), sl: num(sl, decimals), tp: num(tp, decimals), beTrigger: num(dir === "LONG" ? p + Math.abs(p - sl) * 1.5 : p - Math.abs(p - sl) * 1.5, decimals) };
+  const tp1 = dir === "LONG" ? p * (1 + riskPct / 100) : p * (1 - riskPct / 100); // 1R
+  const tp2 = dir === "LONG" ? p * (1 + (riskPct * rr) / 100) : p * (1 - (riskPct * rr) / 100); // 1.8R
+  return {
+    entry: num(p, decimals),
+    sl: num(sl, decimals),
+    tp1: num(tp1, decimals),
+    tp2: num(tp2, decimals),
+    beTrigger: num(dir === "LONG" ? p + Math.abs(p - sl) * 0.5 : p - Math.abs(p - sl) * 0.5, decimals)
+  };
 }
 
 async function scanOnce() {
@@ -358,7 +365,7 @@ async function scanOnce() {
   if (!setups.length) return;
   const top = setups.sort((a, b) => b.jds - a.jds)[0];
 
-  const msg = `🎯 *JTF SWING v3.1 Elite*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n⚖️ Levier: 3x\n🔥 Score: ${top.jds.toFixed(1)}\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI Impulse: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Divergence: ${top.rec.divRSI || "Aucune"}`;
+  const msg = `🎯 *JTF SWING v3.1 Elite*\n\n*${top.symbol}* — ${top.dir === "LONG" ? "📈" : "📉"} *${top.dir}*\n\n💰 Prix: ${top.rec.last}\n💠 Entry: ${top.plan.entry}\n🎯 TP: ${top.plan.tp1} / ${top.plan.tp2}\n🛑 SL: ${top.plan.sl}\n🔁 SL → BE @ ${top.plan.beTrigger}\n⚖️ Levier: 3x\n🔥 Score: ${top.jds.toFixed(1)}\n\n📊 *Elite Metrics:*\n📅 Trend D1: ${top.rec.dailyTrend}\n📉 MFI 4h: ${top.rec.mfi["4h"]?.toFixed(1)}\n🌪 OI Impulse: ${top.rec.oiImpulse?.toFixed(2)}%\n🔍 Divergence: ${top.rec.divRSI || "Aucune"}`;
 
   await sendTelegram(msg);
   registerSignal("SWING", top.symbol, top.dir);
