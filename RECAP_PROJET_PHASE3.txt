@@ -1,0 +1,27 @@
+PROJET : JTF Trading Suite (Phase 3 Evolution)
+
+Objectif : Automatisation de stratégies de trading via 4 bots spécialisés sur Bitget v2 (USDT-Futures) avec filtrage "Elite" via Orderbook, Funding et Open Interest.
+
+1. Architecture des Bots :
+- DISCOVERY (discovery.js) : Intraday (5m/15m). Cherche les impulsions de volume majeures (Ratio > 2.5) et les écarts au VWAP. Score Elite : 80+.
+- DEGEN (degen.js) : Scalping agressif sur volatilité. Très haute réactivité, durée de trade limitée à 45-60 min. Score Elite : 75+.
+- SWING (swing.js) : Stratégie de fond (4h). Basé sur la convergence Divergence RSI + Flux d'argent (MFI) + Open Interest (OI). Seuil Elite : 75+.
+- MAJORS (autoselect.js) : Spécialisé sur BTC/ETH/SOL avec analyse de sentiment et filtres d'Orderbook avancés.
+
+2. État d'avancement (Mi-Phase 3) :
+- Filtres Avancés : Intégration réussie de l'Imbalance de l'Orderbook et du Taux de Financement (filters.js) pour bloquer les trades à contre-courant.
+- Biais de Marché : Pilotage automatique de la direction (LONG/SHORT) basé sur la tendance du BTC.
+- Gestion du risque : Harmonisation des messages avec affichage des cibles TP1/TP2 et du point de sécurisation BE.
+
+3. Corrections Critiques Récentes (20 Janvier 2026) :
+- Fix Open Interest (OI) : Correction majeure dans swing.js et filters.js suite au changement d'API Bitget. Le bot Swing peut à nouveau détecter les entrées de capitaux (indispensable pour ses signaux).
+- Harmonisation BE : Les bots Discovery et Degen affichent désormais un BE Trigger (au niveau du TP1) au lieu du prix sécurisé. Cela évite les sorties prématurées à Break-Even constatées en début de phase.
+
+4. Bilan de Performance Actuel :
+- Phase 3 vs Phase 2 : Amélioration nette du Win Rate Global (60.2% contre 47.7% en Phase 2).
+- Points Forts : DISCOVERY et DEGEN sont très rentables (WR > 64%).
+- Points d'Attention : Le bot SWING est en retard (WR 16%) à cause de l'absence des données OI (maintenant corrigé). Il devrait remonter en performance dès les prochains signaux.
+
+5. Prochaines Étapes :
+- Surveillance de la réactivation du bot Swing avec l'OI.
+- Évaluation de l'extension de la durée limite du bot Degen (passer de 45 à 60-90 min).

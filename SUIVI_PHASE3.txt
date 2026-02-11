@@ -1,0 +1,44 @@
+SUIVI PHASE 3 - AUTONOMIE & BIAIS ADAPTATIF
+==========================================
+
+DÉBUT : 05/01/2026
+-----------------
+
+1. CONCEPT DE LA PHASE 3
+-----------------------
+Après le succès des filtres LONG en Phase 2 (+16.29 USDT), nous automatisons le pilotage.
+Le bot ne dépend plus d'un réglage manuel (SHORT/LONG/BOTH) mais d'un moteur de biais dynamique.
+
+OBJECTIF : Que le bot "pivote" tout seul selon la tendance BTC.
+
+2. CONFIGURATION TECHNIQUE ACTIVÉE
+---------------------------------
+- Module Maître : `market_bias.js`
+- Biais par défaut : `BOTH` sur tous les bots.
+- Algorithme de Pivot :
+    - BTC Haussier (Prix > VWAP 4h) : Bonus +10 setups LONG / Malus -10 setups SHORT.
+    - BTC Baissier (Prix < VWAP 4h) : Bonus +10 setups SHORT / Malus -10 setups LONG.
+
+3. DÉFIS DE LA PHASE 3
+---------------------
+- TOP30 : Doit effacer ses pertes de Phase 2 en profitant des vagues LONG.
+- DEGEN/DISCOVERY : Vérifier que les SHORT "à contre-tendance" sont bien filtrés par le malus.
+- SWING : Tester le mode SHORT (auparavant désactivé) avec le filtre de biais.
+
+4. MÉTRIQUES À SURVEILLER
+------------------------
+- PnL Global : Cible > +10 USDT (actuellement +2.39 USDT cumulé).
+- Efficacité du Pivot : Nombre de trades pris dans le sens du BTC vs contre-tendance.
+- Win Rate SHORT : Doit remonter de 23% (TOP30) à >40% grâce au malus qui élimine les mauvais setups.
+
+5. ACTIONS SI...
+---------------
+- Le bot ne prend plus de trades : Vérifier si les malus sont trop forts.
+- Les pertes continuent en SHORT : Renforcer l'asymétrie des filtres SHORT (similaire aux LONG de Phase 2).
+
+----------------------------------------------------
+CHECKLIST SEMAINE 1 (05/01 - 12/01):
+ [ ] Module `market_bias.js` fonctionne sans erreur (logs Railway).
+ [ ] Premier signal LONG sur TOP30 validé.
+ [ ] Premier signal SHORT sur SWING validé (ou skippé si BTC est vert).
+ [ ] PnL Phase 3 est positif.

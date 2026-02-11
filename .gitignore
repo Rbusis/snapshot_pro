@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+*.numbers
+*.json
+!package.json
+!oi_cache.json
+.env
+logs.*.json
+wif_logs.txt

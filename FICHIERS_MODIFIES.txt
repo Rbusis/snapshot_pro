@@ -1,0 +1,127 @@
+================================================================
+PHASE 3 — MISE À JOUR STRATÉGIQUE (09/01/2026)
+================================================================
+
+1. filters.js (NOUVEAU):
+-----------------------
+- Implémentation de "Advanced Market Intelligence".
+- Filtres : Orderbook Imbalance, Funding Rate, OI Impulse.
+- Utilisé par MAJORS, DISCOVERY et DEGEN pour affiner la qualité des signaux.
+
+2. signals_registry.js:
+-----------------------
+- Extension de la fenêtre anti-doublon à 45 minutes.
+- Ajout du helper isTimeBlocked() pour le "Midnight Taiwan Filter".
+- Synchronise les bots pour éviter la corrélation excessive.
+
+3. discovery.js (v2.0):
+-----------------------
+- Intégration du clipping de score à 95 (protection contre les excès/trappes).
+- Intégration des filtres avancés (filters.js).
+- Blackliste WIFUSDT et WIFUSDT_UMCBL.
+- Correction du calcul BE (+0.2% commission) pour éviter les BE négatifs.
+- Retrait des setups si RSI/Gap sont en dehors des zones optimales LONG/SHORT.
+
+4. degen.js (v4.0):
+-------------------
+- Passage en v4.0 Scalping Edition.
+- Scoring plus strict [80-94] (Trap Protection).
+- **Reéquilibrage Score (v4.1 Patch):** Passage au **Scoring Linéaire** (Volume & Gap proportionnels). Fini les effets de seuil brutaux (ex: 75 vs 80).
+- **Discovery Anti-Spam Patch (v2.1):**
+    - Seuil remonté à **80** pour filtrer le bruit excessif.
+    - Ajout de la protection anti-spam persistante sur 24h.
+- **Degen Time Limit (NOUVEAU):**
+    - Ajout d'une alerte Telegram automatique après **45 minutes**.
+    - Message "TIME LIMIT REACHED - CLOSE NOW" pour forcer la rotation du capital.
+- **Discovery Time Limit (NOUVEAU):**
+    - Ajout d'une alerte Telegram automatique après **8 heures**.
+    - Adapté à la stratégie intraday complète de Discovery (2h-8h).
+- **Swing Optimisation (v3.2):**
+    - Fréquence accélérée : Scan toutes les **15 minutes** (au lieu de 30).
+    - **Mode 24/7 :** Suppression du blocage "Midnight Taiwan" pour le Swing (inutile sur du H4).
+    - **Time Limit :** Alerte Telegram après **48 heures** de détention.
+- **Majors Time Limit (NOUVEAU):**
+    - Ajout d'une alerte Telegram automatique après **72 heures**.
+    - Adapté aux mouvements lents des BTC/ETH/SOL.
+- **Swing OI Fix (CRITIQUE):**
+    - Correction du bug d'Open Interest (toujours à 0.0%).
+    - L'API Bitget v2 retourne `openInterestUsd` (string), pas `openInterest`.
+    - Ajout de validation pour ne sauvegarder que des valeurs valides.
+- Intégration des filtres avancés (Orderbook/Funding).
+- Blackliste WIFUSDT.
+- Correction BE (+0.2% flush).
+
+5. autoselect.js (MAJORS v2.0):
+------------------------------
+- Pivot symboles : BTC, ETH, SOL uniquement.
+- Sensibilité augmentée (suppression du diviseur 3 sur le delta prix).
+- Levier standardisé à 10x.
+- Intégration des filtres avancés et clipping @ 95.
+
+6. swing.js (v2.0):
+-------------------
+- Mise à jour format Telegram : TP affiché avant le SL.
+- Intégration du Midnight Filter.
+
+7. index.js:
+------------
+- Point d'entrée global pour le déploiement.
+
+================================================================
+RÉGLAGES SYSTÈME (Biais Dynamique):
+================================================================
+- Tous les bots utilisent désormais market_bias.js pour un pivot AUTOMATIQUE.
+- Pas de réglage manuel Railway nécessaire pour la direction.
+- Midnight Filter actif : 22h00 - 00h30 Taiwan (Bloque les nouvelles entrées).
+
+================================================================
+HOTFIX & LOGS — VISIBILITÉ (13/01/2026)
+================================================================
+
+1. autoselect.js :
+-----------------
+- Correction ReferenceError : Ajout de la fonction sendTelegram() manquante.
+- Visibilité : Ajout de logs détaillés (MMS, Fusion) et résumé de scan systématique.
+- Notifications : Ajout de la notification de démarrage Telegram.
+
+2. discovery.js / degen.js / swing.js :
+---------------------------------------
+- Visibilité : Ajout de résumés de scan (`console.log`) visibles même sans signal.
+- Visibilité : Ajout de logs détaillés pour CHAQUE symbole analysé (VolRatio, Gap, Vola) en mode DEBUG.
+- Notifications : Intégration de `sendTelegram()` et ajout des notifications de démarrage.
+
+3. index.js :
+------------
+- Correction SyntaxError : Réécrit pour ESM.
+
+4. debug.js :
+-------------
+- Activation globale : `global: true` par défaut pour restaurer la visibilité.
+
+================================================================
+RESTORATION — DISCOVERY BOT (15/01/2026)
+================================================================
+
+1. discovery.js :
+-----------------
+- Sensibilité finale : Seuil de score à **80** (aligné sur Degen).
+- Filtres finaux : VolRatio min à **2.5** (Long) / **2.0** (Short).
+- Gaps de prix optimisés : **[0.5, 2.5]** pour Long et **[0.8, 3.5]** pour Short.
+- Scoring durci : Nécessite une confluence totale pour atteindre le seuil de 80.
+
+================================================================
+UPGRADE — SWING BOT v3.1 ELITE (16/01/2026)
+================================================================
+
+1. swing.js :
+-------------
+- **Swing Elite v3.1 Selectivity Patch:**
+    - Seuil JDS relevé à **75** pour exiger une confluence "Elite" (MFI, Div ou OI).
+    - **Persistance des signaux :** Les signaux sont désormais sauvegardés dans `signals_history.json`. Le bot ne "spammera" plus les mêmes pièces après un redémarrage.
+    - Correction du levier et de l'OI Impulse.
+- Ajout de l'indicateur **MFI** (Money Flow Index) pondéré par le volume.
+- Algorithme de détection des **Divergences RSI** intégré.
+- Suivi de l'impulsion de l'**Open Interest** (OI) pour confirmer la force.
+- Filtrage **EMA 200 (4h)** et tendance **Daily (D1)** systématique.
+- Seuil de score "Elite" fixé à **65**.
+- Anti-doublon étendu à **24h** par symbole.

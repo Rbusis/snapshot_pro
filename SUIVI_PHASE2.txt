@@ -1,0 +1,188 @@
+SUIVI PHASE 2 - TRADING BOTS (VERSION AMÉLIORÉE)
+=================================================
+
+APRÈS DÉPLOIEMENT DES AMÉLIORATIONS
+====================================
+
+1. VÉRIFIER LOGS RAILWAY (Jour 1)
+   - Chercher messages de signaux (ex: "[DISCOVERY ENTRY]", "[TOP30 ENTRY]")
+   - SWING: chercher "[SWING SKIP] ... SHORT filtered" (doit skipper SHORT)
+   - Autres bots: peuvent trader LONG et SHORT (signaux améliorés)
+   - Vérifier aucune erreur de syntaxe
+   
+CHANGEMENT D'APPROCHE:
+---------------------
+Au lieu de bloquer strictement les directions perdantes, on a AMÉLIORÉ
+les signaux LONG avec des filtres asymétriques :
+
+DISCOVERY (5 améliorations):
+  - RSI: 45-65 pour LONG (vs 55-75 avant)
+  - Gap VWAP: 0.3-1.8 pour LONG (vs 0.6-3.2)
+  - Wicks: 2.0 tolérance (vs 1.2)
+  - Momentum: skip LONG si change24 < -2%
+  - Scoring bonus: +20 si change24 > 5%
+
+DEGEN (2 améliorations):
+  - Gap: 0.6-2.2 pour LONG (vs 0.8-2.8)
+  - Anti-top: RSI 85 (vs 80)
+
+TOP30 (1 amélioration):
+  - Bias scoring: +10 SHORT, -5 LONG
+
+SWING (inchangé):
+  - LONG only strict (SHORT skipped)
+
+
+2. NOTER CHAQUE TRADE (sur Notion/Excel ou CSV fourni)
+   - Date/Heure
+   - Bot (SWING/DISCOVERY/DEGEN/TOP30)
+   - Symbol (ex: BTCUSDT)
+   - Direction (LONG/SHORT)
+   - Entry prix
+   - Exit prix
+   - PnL net (après fees)
+   - Exit raison: TP / SL / BE / Timeout
+
+
+3. MÉTRIQUES À CALCULER (après 20 trades minimum)
+
+   Pour CHAQUE BOT:
+   
+   a) DIRECTION
+      - Nombre LONG: __
+      - Nombre SHORT: __
+      - SWING: vérifier 100% LONG (0 SHORT)
+   
+   b) PnL
+      - Total PnL: ____ USDT
+      - Avg PnL par trade: ____ USDT
+      - Target: positif
+   
+   c) WIN RATE
+      - Wins: __
+      - Losses: __
+      - BE (±0.1 USDT): __
+      - Win Rate = Wins / (Wins + Losses) x 100
+      - Target SWING: >55%, DISCOVERY: >48%, DEGEN: >48%, TOP30: >42%
+   
+   d) BE RATE
+      - BE trades: __
+      - Total trades: __
+      - BE Rate = BE / Total x 100
+      - Target: <10%
+
+
+4. PARAMÈTRES PAR BOT (Récapitulatif)
+=====================================
+
+| Bot       | Durée Max (Est.) | Stratégie BE | Mise/Levier | Cibles TP         |
+| :-------- | :--------------- | :----------- | :---------- | :---------------- |
+| SWING     | 1j - 4 jours     | **+1.5R**    | 10$ / 2-3x  | Unique (1.8R)     |
+| DISCOVERY | 2h - 8h          | **+1.0R**    | 10$ / 2-3x  | Unique (1.6R)     |
+| DEGEN     | 30m - 3h         | **+1.0R**    | 10$ / 2-3x  | Unique (1.5-1.7R) |
+| TOP30     | 4h - 12h         | **+1.0R**    | 10$ / 4x    | **TP1/TP2** (>85) |
+
+
+DÉTAILS DES STRATÉGIES :
+------------------------
+
+- **Break-Even (BE)** : 
+  - +1.0R = On sécurise à l'entrée quand le profit = risque initial.
+  - +1.5R (SWING) = On attend un move plus large pour laisser respirer.
+  
+- **TP1 / TP2** : 
+  - TOP30 : Envoie 2 cibles si confiance > 85.
+  - Autres : Cible unique optimisée (plus basse qu'en Phase 1).
+
+- **Hold Time** : 
+  - Si le bot n'a ni SL ni TP après cette durée, surveiller la structure.
+
+
+5. COMPARAISON PHASE 1 vs PHASE 2 (après 2 semaines)
+
+   SWING:
+   - Phase 1: -1.07 USDT (19 trades, 26% BE, 63% SHORT)
+   - Phase 2: ____ USDT (__trades, __% BE, __% SHORT)
+   - Target: >+3 USDT, BE <10%, SHORT 0%
+   
+   DISCOVERY:
+   - Phase 1: -6.51 USDT (39 trades, 15% BE, LONG WR 35%)
+   - Phase 2: ____ USDT (__trades, __% BE, LONG WR __%)
+   - Target: >-2 USDT, BE <8%, LONG WR >50%
+   
+   DEGEN:
+   - Phase 1: +0.17 USDT (51 trades, 10% BE, LONG WR 44%)
+   - Phase 2: ____ USDT (__trades, __% BE, LONG WR __%)
+   - Target: >+1 USDT, LONG WR >48%
+   
+   TOP30:
+   - Phase 1: -6.77 USDT (40 trades, 5% BE, LONG WR 30.8%)
+   - Phase 2: ____ USDT (__trades, __% BE, LONG WR __%)
+   - Target: >+0 USDT, LONG WR >40%
+   
+   TOTAL:
+   - Phase 1: -14.18 USDT
+   - Phase 2: ____ USDT
+   - Target: >+5 USDT (+340% amélioration)
+
+
+5. EXPORT BITGET (fin Phase 2)
+   - Aller sur Bitget → Orders → Futures
+   - Exporter CSV (même format que Phase 1)
+   - Sauvegarder: "Export_Phase2_YYYY-MM-DD.csv"
+   - Garder pour analyse Python
+
+
+6. ALERTES (stopper si)
+   - Daily loss > 5% du capital
+   - 5 losses consécutives sur même bot
+   - BE rate > 25% sur 20 trades
+   - Problème technique (bot ne trade plus)
+
+
+7. DURÉE PHASE 2
+   - Minimum: 2 semaines
+   - OU minimum: 50 trades par bot
+   - Pas de changement de code pendant Phase 2
+
+
+8. QUESTIONS À SE POSER (fin Phase 2)
+   - Les LONG DISCOVERY/DEGEN/TOP30 performent-ils mieux?
+   - Le BE rate de SWING a-t-il baissé? (target <10%)
+   - Le PnL total est-il positif?
+   - Quel bot performe le mieux?
+   - Les filtres asymétriques fonctionnent-ils?
+   - Besoin d'ajuster les seuils?
+
+
+9. CHECKLIST HEBDOMADAIRE
+   Semaine 1:
+   [ ] Logs vérifiés (pas d'erreur)
+   [ ] 10+ trades par bot collectés
+   [ ] Aucune alerte déclenchée
+   [ ] BE rate <15%
+   [ ] LONG DISCOVERY/TOP30 gagnent >40%
+   
+   Semaine 2:
+   [ ] 20+ trades par bot collectés
+   [ ] PnL trending positif
+   [ ] BE rate <10%
+   [ ] LONG améliorés vs Phase 1
+   [ ] Prêt pour export CSV final
+
+
+10. APRÈS PHASE 2
+    - Exporter CSV Bitget
+    - Relancer: python3 analyze_trading_bots.py
+    - Comparer LONG Phase 1 vs Phase 2
+    - Valider améliorations asymétriques
+    - Décider: Phase 3 ou ajustements
+
+
+RAPPEL IMPACT ATTENDU:
+=====================
+- DISCOVERY LONG: 35% WR → 50-55% WR
+- DEGEN LONG: 44% WR → 48-52% WR  
+- TOP30 LONG: 30.8% WR → 40-45% WR
+- SWING: -1.07 → +3 à +5 USDT
+- Total: -14.18 → +5 à +10 USDT

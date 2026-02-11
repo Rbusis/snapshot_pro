@@ -1,0 +1,311 @@
+================================================================================
+                    ÉTAT DU PROJET - TRADING BOTS JTF
+                            Phase 3.4 (Février 2026)
+================================================================================
+
+█ ARCHITECTURE GLOBALE
+================================================================================
+
+Le projet comprend 4 bots de trading algorithmique sur Bitget Futures (USDT):
+
+1. JTF DEGEN (v4.3)     - Scalping haute fréquence (2min scan)
+2. JTF DISCOVERY (v2.1) - Intraday mean-reversion (5min scan)
+3. JTF SWING (v3.2)     - Multi-jours reversal (10min scan)
+4. JTF MAJORS (v2.0)    - BTC/ETH/SOL micro-pivots (7min scan)
+
+Tous les bots sont hébergés sur Railway et communiquent via Telegram.
+
+
+█ FICHIERS PRINCIPAUX
+================================================================================
+
+Core Logic:
+- degen.js         : Bot DEGEN (scalping 2h max)
+- discovery.js     : Bot DISCOVERY (intraday 8h max)  
+- swing.js         : Bot SWING (mean-reversion multi-jours)
+- autoselect.js    : Bot MAJORS (BTC/ETH/SOL uniquement)
+
+Shared Modules:
+- filters.js       : Filtres avancés (Orderbook, Funding, OI, Trend ADX/EMA)
+- market_bias.js   : Détection automatique du biais BTC (BULLISH/BEARISH/NEUTRAL)
+- signals_registry.js : Cooldown et anti-spam
+- debug.js         : Système de logs conditionnels
+
+Data:
+- Suivi_Trades_Phase3/Suivi_Trades_Phase3.csv : Historique des trades (143 trades)
+
+
+█ PERFORMANCES PHASE 3 (13-21 Janvier 2026, ~8 jours)
+================================================================================
+
+┌─────────────┬────────┬─────────────┬──────────┬─────────────────┐
+│ Bot         │ Trades │ PnL (USDT)  │ /Jour    │ Status          │
+├─────────────┼────────┼─────────────┼──────────┼─────────────────┤
+│ DISCOVERY   │   50   │   +7.40     │  ~6/j    │ ✅ PROFITABLE   │
+│ DEGEN       │   69   │   -0.76     │  ~9/j    │ ⚖️ BREAK-EVEN    │
+│ MAJORS      │   13   │   -9.35     │  ~1.6/j  │ ❌ NÉGATIF       │
+│ SWING       │   10   │   -7.74     │  ~1.3/j  │ ❌ NÉGATIF       │
+├─────────────┼────────┼─────────────┼──────────┼─────────────────┤
+│ TOTAL       │  142   │  -10.45     │ 17-18/j  │ ❌ NÉGATIF       │
+└─────────────┴────────┴─────────────┴──────────┴─────────────────┘
+
+⚠️ PROBLÈMES IDENTIFIÉS PHASE 3 :
+- MAJORS/SWING : Trop de SL sur trades à contre-tendance
+- SWING : 100% de Stop Loss (11 trades, tous LONG dans un marché baissier)
+- DEGEN : Time limit 45min trop court (beaucoup de sorties prématurées)
+
+
+█ OPTIMISATIONS APPLIQUÉES
+================================================================================
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ PHASE 3.2 (Mi-Janvier 2026)                                               │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✅ MAJORS : Seuil augmenté 85 → 92                                         │
+│ ✅ MAJORS : Sensibilité réduite (diviseur 1.5 → 2.0)                       │
+│ ✅ SWING  : Seuil augmenté 75 → 85                                         │
+│ ✅ SWING  : Intégration filtres ADX/EMA (via filters.js)                   │
+│ ✅ SWING  : Pénalités renforcées contre-tendance (-10 → -20, -5 → -15)    │
+│ ✅ SWING  : Logs OI harmonisés (affiche Raw OI + Delta)                    │
+│ ✅ GLOBAL : Suppression suspension nocturne (22:30-00:30 Taiwan)           │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ PHASE 3.3 (7 Février 2026)                                                │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✅ DEGEN : Time Limit 45min → 120min                                       │
+│ ✅ DEGEN : SL élargi (vola/8 → vola/7, min 2.0%)                          │
+│ ✅ DEGEN : BE trigger 0.3R → 0.5R                                          │
+│ ✅ DEGEN : Biais automatique (suit BTC si BULLISH/BEARISH)                 │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ PHASE 3.4 (7 Février 2026) - CODE OPTIMIZATION                            │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✅ SWING     : Pénalités réduites (-20/-15 → -10/-10) pour reversals      │
+│ ✅ DISCOVERY : Entry dynamique (0.20/0.25/0.30 selon gap)                  │
+│ ✅ DISCOVERY : Suppression code dupliqué (score > 96 check)                │
+│ ✅ MAJORS    : Time limit vérifié (24h notification présente)              │
+└────────────────────────────────────────────────────────────────────────────┘
+
+
+█ CONFIGURATION ACTUELLE DES BOTS
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ JTF DEGEN v4.3 (Scalping volatil)                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Scan         : 2 minutes                                                    │
+│ Symboles     : Top 40 par volume (dynamique, >3M USDT/24h)                 │
+│ Seuil        : 75/100                                                       │
+│ Cooldown     : 30 minutes                                                   │
+│ Time Limit   : 120 minutes (2h)                                             │
+│ Levier       : 2x-3x (selon volatilité)                                     │
+│ SL/TP        : SL = vola/7 (min 2.0%), TP1 = 1R, TP2 = 1.5-1.7R            │
+│ BE Trigger   : 0.5R                                                         │
+│ Filtres      : Volume ratio >3.0, Gap 0.6-2.8%, RSI zones, Biais BTC       │
+│ Piège        : Score >96 bloqué                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ JTF DISCOVERY v2.1 (Intraday mean-reversion)                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Scan         : 5 minutes                                                    │
+│ Symboles     : Top 50 par volume (dynamique, >5M USDT/24h)                 │
+│ Seuil        : 80/100                                                       │
+│ Cooldown     : 30 minutes                                                   │
+│ Time Limit   : 8 heures                                                     │
+│ Levier       : 2x-3x (selon volatilité)                                     │
+│ SL/TP        : SL = (vola/5)*2 (2-5%), TP1 = 1R, TP2 = 1.6R                │
+│ BE Trigger   : 0.5R                                                         │
+│ Entry        : Retrace dynamique (0.20/0.25/0.30 selon gap)                │
+│ Scoring      : Linéaire (Volume 20-50pts, Gap 10-30pts, RSI 10-20pts)      │
+│ Filtres      : Volume ratio >2.0-2.5, Gap 0.5-3.5%, Wicks, Biais BTC       │
+│ Piège        : Pas de blocage score élevé (filtres avancés suffisent)      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ JTF SWING v3.2 (Multi-jours reversal)                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Scan         : 10 minutes                                                   │
+│ Symboles     : Top 25 par volume                                            │
+│ Seuil        : 85/100                                                       │
+│ Cooldown     : 120 minutes (2h)                                             │
+│ Time Limit   : 72 heures (3 jours)                                          │
+│ Levier       : 5x                                                           │
+│ SL/TP        : SL = vola/5 (1-3%), TP1 = 1.5R, TP2 = 3R                    │
+│ BE Trigger   : Après TP1                                                    │
+│ Scoring      : Trend D1 (±20), EMA200 (±10), RSI 4h (±15),                 │
+│                Divergence (±25), MFI (±15), OI (±20), Biais (±10)          │
+│ Filtres      : ADX/EMA Slope (via filters.js), OI Impulse, Divergences     │
+│ Pénalités    : -10 contre-tendance D1, -10 contre EMA200 (Phase 3.4)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ JTF MAJORS v2.0 (BTC/ETH/SOL micro-pivots)                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Scan         : 7 minutes                                                    │
+│ Symboles     : BTCUSDT, ETHUSDT, SOLUSDT (FIXE)                             │
+│ Seuil        : 92/100                                                       │
+│ Cooldown     : 60 minutes                                                   │
+│ Time Limit   : 24 heures                                                    │
+│ Levier       : 8x                                                           │
+│ SL/TP        : SL = vola/2.5 (0.8-4%), TP1 = 1R*RR, TP2 = 1.8*TP1          │
+│ BE Trigger   : 0.5R                                                         │
+│ Scoring      : MMS (Multi-timeframe Momentum), MFI (±15), Divergence (±20),│
+│                OI Impulse (±10), Biais (±10)                                │
+│ Filtres      : ADX/EMA Slope, Orderbook, Funding, Trend blockers           │
+│ RR           : Dynamique (vola-adjusted)                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+█ MODULES PARTAGÉS
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ filters.js - Filtres Avancés Phase 3                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • getOrderbookImbalance() : Ratio Bid/Ask (Bullish >1.2, Bearish <0.8)     │
+│ • getFundingRate()        : Funding rate actuel                             │
+│ • getOpenInterest()       : OI brut et variation                            │
+│ • applyAdvancedFilters()  : Combinaison de tous les filtres                │
+│   - Bloque si Orderbook trop déséquilibré                                   │
+│   - Bloque si Funding rate extrême contre le trade                          │
+│   - Calcule ADX et pente EMA pour détecter tendances fortes                 │
+│   - Bloque SHORT sur tendance haussière forte (ADX >25, EMA slope >0.5%)    │
+│   - Bloque LONG sur tendance baissière forte                                │
+│   - Ajuste le score selon les confirmations                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ market_bias.js - Détection Automatique de Biais BTC                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • getMarketBias()         : Analyse BTC pour déterminer biais global       │
+│   - Calcule distance au VWAP 4h                                             │
+│   - Vérifie change 24h                                                      │
+│   - Retourne: { bias: "BOTH", label: "NEUTRAL", btcTrend: 0 }              │
+│     OU        { bias: "BOTH", label: "BULLISH", btcTrend: +0.8 }           │
+│     OU        { bias: "BOTH", label: "BEARISH", btcTrend: -1.2 }           │
+│                                                                              │
+│ • getBiasScoreAdjustment(): Ajuste le score selon biais (+10/-10)          │
+│                                                                              │
+│ Note: Actuellement le bias retourne toujours "BOTH" pour scoring seulement.│
+│       Si on veut un blocage strict, modifier pour retourner "LONG"/"SHORT". │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ signals_registry.js - Anti-spam et Cooldown                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • isRecentlySignaled()    : Vérifie si symbole déjà signalé récemment      │
+│ • registerSignal()        : Enregistre nouveau signal avec timestamp       │
+│ • isTimeBlocked()         : Vérifie suspension horaire (DÉSACTIVÉ)          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+█ ENVIRONNEMENT & DÉPLOIEMENT
+================================================================================
+
+Platform    : Railway (Cloud hosting)
+Runtime     : Node.js v18.20.8
+Dependencies: node-fetch (HTTP requests)
+Entry Point : index.js (démarre les 4 bots en parallèle)
+
+Variables d'environnement (.env):
+- TELEGRAM_BOT_TOKEN      : Token du bot Telegram
+- TELEGRAM_CHAT_ID        : Chat ID pour notifications
+- DEGEN_BIAS              : "BOTH" (ou "LONG"/"SHORT" pour forcer)
+- DISCOVERY_BIAS          : "BOTH"
+- SWING_BIAS              : "BOTH"
+- TOP30_BIAS              : "BOTH"
+- *_BIAS_STRICT           : "true" pour mode strict (force direction)
+- DEBUG_GLOBAL            : "true" pour logs détaillés
+- DEBUG_DEGEN/etc.        : "true" pour logs par bot
+
+
+█ ANALYSE CRITIQUE DU CODE (Phase 3.4)
+================================================================================
+
+✅ CORRECTIONS APPLIQUÉES:
+1. SWING : Pénalités réduites pour permettre reversals de qualité
+2. DISCOVERY : Entry adaptative selon amplitude du gap
+3. DISCOVERY : Code dupliqué supprimé
+
+⚠️ POINTS D'ATTENTION RESTANTS:
+1. market_bias.js retourne "BOTH" même en tendance marquée
+   → Le biais est utilisé pour scoring (+10/-10) mais ne bloque pas
+   → Pour un blocage strict: modifier pour retourner "LONG"/"SHORT"
+
+2. MAJORS utilise un calcul TP2 différent (1.8x TP1 au lieu de RR-based)
+   → Vérifier si intentionnel pour stabilité des Majors
+
+3. Volatilité par défaut = 5% si API ne retourne pas high24h/low24h
+   → Risque de fausser SL/TP, mais rare en pratique
+
+
+█ ÉTAT ACTUEL & PROCHAINES ÉTAPES
+================================================================================
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ÉTAT : PRÊT POUR DÉPLOIEMENT Phase 3.4                                    │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✅ Tous les bots optimisés                                                 │
+│ ✅ Code propre et cohérent                                                 │
+│ ✅ Filtres de protection en place                                          │
+│ ✅ Logs détaillés activables                                               │
+│ ✅ Time limits harmonisés                                                  │
+│ ✅ Risk management standardisé                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+
+RECOMMANDATIONS:
+1. Déployer sur Railway avec les modifications Phase 3.4
+2. Monitorer intensivement les 7 premiers jours:
+   - Vérifier que SWING capture maintenant des reversals
+   - Confirmer que DISCOVERY positionne mieux ses entries
+   - Observer si DEGEN bénéficie du time limit 2h
+3. Tracker métriques par bot (Win Rate, PnL/jour, Avg Duration)
+4. Ajuster seuils si nécessaire après 2 semaines de data
+
+RISQUES:
+- Aucune garantie de profitabilité (marchés imprévisibles)
+- Phase 3 était négative globalement (-10.45 USDT)
+- DISCOVERY est le seul bot qui a démontré sa rentabilité
+- SWING/MAJORS nécessitent validation sur données fraîches
+
+KILL-SWITCH RECOMMANDÉ:
+- Si un bot fait -15% sur 7 jours → Pause automatique
+- Si portfolio global fait -20% → Revue complète de la stratégie
+
+
+█ HISTORIQUE DES PHASES
+================================================================================
+
+Phase 1 (Déc 2025)  : Développement initial, bots basiques
+Phase 2 (Déc 2025)  : Première version production, analyse performances
+Phase 3.0 (Jan 2026): Transformation TOP30 → MAJORS, ajout filtres avancés
+Phase 3.1 (Jan 2026): Ajustements seuils et sensibilité
+Phase 3.2 (Jan 2026): Filtres ADX/EMA, pénalités SWING, logs OI
+Phase 3.3 (Fév 2026): Optimisation DEGEN (time/SL/BE)
+Phase 3.4 (Fév 2026): Code optimization (SWING penalties, DISCOVERY entry)
+
+
+█ MÉTRIQUES CLÉS À SURVEILLER
+================================================================================
+
+Par Bot:
+- Win Rate (TP / Total trades)
+- PnL Net (après frais estimés)
+- Avg Trade Duration
+- SL Rate vs BE Rate vs TP Rate
+- Score moyen des trades gagnants vs perdants
+
+Global:
+- Portfolio PnL (USDT)
+- Nombre de trades/jour (target: 17-35)
+- Drawdown maximal
+- Sharpe Ratio (si >100 trades)
+
+
+================================================================================
+                            FIN DU RAPPORT
+                   Dernière mise à jour: 8 Février 2026
+================================================================================
