@@ -312,7 +312,21 @@ async function scanOnce() {
   const lines = ["⚡ *JTF MAJORS v2.1 Elite* ⚡"];
   for (const c of selected) {
     const dirEmoji = c.direction === "LONG" ? "🚀" : "🪂";
-    lines.push(`\n${dirEmoji} *${c.symbol}* — ${c.direction}\n🏅 Score: ${c.score.toFixed(1)}`);
+
+    // 💡 Action Recommendation Logic
+    const current = activeTrades.get(c.symbol);
+    let actionAdvice = "";
+    if (current) {
+      if (current.direction === c.direction) {
+        actionAdvice = "\n🔄 **ACTION : RENFORCER / UPDATE**";
+      } else {
+        actionAdvice = "\n🔄 **ACTION : FLIP / CLOSE PREVIOUS**";
+      }
+    } else {
+      actionAdvice = "\n🆕 **ACTION : NOUVEAU TRADE**";
+    }
+
+    lines.push(`\n${dirEmoji} *${c.symbol}* — ${c.direction}${actionAdvice}\n🏅 Score: ${c.score.toFixed(1)}`);
     lines.push(`\n💰 Prix: ${c.rec.last}\n💠 Entry: ${c.plan.entry}\n🎯 TP: ${c.plan.tp1} / ${c.plan.tp2}\n🛑 SL: ${c.plan.sl}\n🔁 SL → BE @ ${c.plan.bePrice}\n⚖️ Levier: ${SUGGESTED_LEVERAGE}`);
 
     // Elite Metrics (Optional but helpful for Majors)
@@ -320,8 +334,8 @@ async function scanOnce() {
 
     registerSignal("MAJORS", c.symbol, c.direction);
 
-    // Enregistrement pour le suivi chrono
-    activeTrades.set(c.symbol, Date.now());
+    // Enregistrement pour le suivi chrono + direction
+    activeTrades.set(c.symbol, { timestamp: Date.now(), direction: c.direction });
   }
 
   await sendTelegram(lines.join("\n"));
@@ -330,8 +344,8 @@ async function scanOnce() {
 // ========= TIME LIMIT MONITOR =========
 async function checkTimeLimits() {
   const now = Date.now();
-  for (const [symbol, entryTime] of activeTrades.entries()) {
-    if (now - entryTime >= TIME_LIMIT_MS) {
+  for (const [symbol, tradeData] of activeTrades.entries()) {
+    if (now - tradeData.timestamp >= TIME_LIMIT_MS) {
       // Envoi alerte
       const msg = `⚠️ *MAJORS TIME LIMIT* ⚠️
 
